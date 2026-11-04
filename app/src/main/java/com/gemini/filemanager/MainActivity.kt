@@ -1,0 +1,228 @@
+package com.gemini.filemanager
+
+import android.Manifest
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
+import android.os.Bundle
+import android.os.Environment
+import android.provider.Settings
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
+import androidx.navigation.NavType
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.rememberNavController
+import androidx.navigation.navArgument
+import com.gemini.filemanager.data.model.FileCategory
+import com.gemini.filemanager.ui.screens.category.CategoryFileListScreen
+import com.gemini.filemanager.ui.screens.duplicate.DuplicateFilesScreen
+import com.gemini.filemanager.ui.screens.home.HomeScreen
+import com.gemini.filemanager.ui.screens.localsend.LocalSendScreen
+import com.gemini.filemanager.ui.screens.m3u8.M3U8ConvertScreen
+import com.gemini.filemanager.ui.theme.AndroidFileManagerTheme
+import java.io.File
+
+class MainActivity : ComponentActivity() {
+
+    private var hasStoragePermission by mutableStateOf(false)
+    private var sharedFilesToTransmit by mutableStateOf<List<File>>(emptyList())
+
+    private val permissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        checkStoragePermission()
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+
+        handleIncomingShareIntent(intent)
+        checkStoragePermission()
+
+        setContent {
+            AndroidFileManagerTheme {
+                if (!hasStoragePermission) {
+                    PermissionGuideScreen(
+                        onRequestPermission = { requestStoragePermission() }
+                    )
+                } else {
+                    MainNavigation(initialFiles = sharedFilesToTransmit)
+                }
+            }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        checkStoragePermission()
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        handleIncomingShareIntent(intent)
+    }
+
+    private fun handleIncomingShareIntent(intent: Intent?) {
+        if (intent == null) return
+        val action = intent.action
+        val type = intent.type
+
+        if (Intent.ACTION_SEND == action && type != null) {
+            val uri = intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
+            uri?.path?.let {
+                sharedFilesToTransmit = listOf(File(it))
+            }
+        } else if (Intent.ACTION_SEND_MULTIPLE == action && type != null) {
+            val uris = intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM)
+            val list = uris?.mapNotNull { it.path?.let { path -> File(path) } } ?: emptyList()
+            if (list.isNotEmpty()) {
+                sharedFilesToTransmit = list
+            }
+        }
+    }
+
+    private fun checkStoragePermission() {
+        hasStoragePermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            Environment.isExternalStorageManager()
+        } else {
+            val read = ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+            val write = ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+            read && write
+        }
+    }
+
+    private fun requestStoragePermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            try {
+                val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
+                    data = Uri.parse("package:$packageName")
+                }
+                startActivity(intent)
+            } catch (e: Exception) {
+                val intent = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
+                startActivity(intent)
+            }
+        } else {
+            permissionLauncher.launch(
+                arrayOf(
+                    Manifest.permission.READ_EXTERNAL_STORAGE,
+                    Manifest.permission.WRITE_EXTERNAL_STORAGE
+                )
+            )
+        }
+    }
+}
+
+@Composable
+fun PermissionGuideScreen(onRequestPermission: () -> Unit) {
+    Surface(modifier = Modifier.fillMaxSize()) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(32.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            Text(
+                text = "需要存储管理权限",
+                fontSize = 22.sp,
+                style = MaterialTheme.typography.titleLarge
+            )
+            Spacer(modifier = Modifier.height(16.dp))
+            Text(
+                text = "为了让您能够扫描与分类查看图片、音视频、安装包、压缩包，以及嗅探合并浏览器下载的离线 M3U8 分片，需要授予「所有文件访问权限」。",
+                fontSize = 14.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                lineHeight = 20.sp
+            )
+            Spacer(modifier = Modifier.height(24.dp))
+            Button(onClick = onRequestPermission) {
+                Text("前往系统设置授予权限")
+            }
+        }
+    }
+}
+
+@Composable
+fun MainNavigation(initialFiles: List<File> = emptyList()) {
+    val navController = rememberNavController()
+    var targetTransmitFiles by remember { mutableStateOf(initialFiles) }
+
+    NavHost(
+        navController = navController,
+        startDestination = if (initialFiles.isNotEmpty()) "localsend" else "home"
+    ) {
+        composable("home") {
+            HomeScreen(
+                onNavigateCategory = { cat ->
+                    navController.navigate("category/${cat.name}")
+                },
+                onNavigateM3U8 = {
+                    navController.navigate("m3u8")
+                },
+                onNavigateLocalSend = {
+                    targetTransmitFiles = emptyList()
+                    navController.navigate("localsend")
+                },
+                onNavigateDuplicate = {
+                    navController.navigate("duplicate")
+                }
+            )
+        }
+
+        composable(
+            route = "category/{categoryName}",
+            arguments = listOf(navArgument("categoryName") { type = NavType.StringType })
+        ) { backStackEntry ->
+            val catName = backStackEntry.arguments?.getString("categoryName") ?: FileCategory.DOCUMENT.name
+            val category = try {
+                FileCategory.valueOf(catName)
+            } catch (e: Exception) {
+                FileCategory.DOCUMENT
+            }
+
+            CategoryFileListScreen(
+                category = category,
+                onBack = { navController.popBackStack() },
+                onSendViaLocalSend = { files ->
+                    targetTransmitFiles = files
+                    navController.navigate("localsend")
+                }
+            )
+        }
+
+        composable("m3u8") {
+            M3U8ConvertScreen(
+                onBack = { navController.popBackStack() },
+                onSendFile = { file ->
+                    targetTransmitFiles = listOf(file)
+                    navController.navigate("localsend")
+                }
+            )
+        }
+
+        composable("localsend") {
+            LocalSendScreen(
+                initialFiles = targetTransmitFiles,
+                onBack = { navController.popBackStack() }
+            )
+        }
+
+        composable("duplicate") {
+            DuplicateFilesScreen(
+                onBack = { navController.popBackStack() }
+            )
+        }
+    }
+}

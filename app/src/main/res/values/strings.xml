@@ -1,0 +1,11 @@
+<resources>
+    <string name="app_name">Q管理</string>
+    <string name="category_images">图片</string>
+    <string name="category_audio">音乐</string>
+    <string name="category_docs">文档</string>
+    <string name="category_video">视频</string>
+    <string name="category_apk">安装包</string>
+    <string name="category_zip">压缩包</string>
+    <string name="m3u8_tool_name">M3U8批量转MP4</string>
+    <string name="localsend_tool_name">LocalSend互传</string>
+</resources>
