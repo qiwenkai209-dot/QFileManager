@@ -3,9 +3,11 @@ package com.gemini.filemanager.ui.screens.m3u8
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.gemini.filemanager.core.m3u8.M3U8ConvertEvent
 import com.gemini.filemanager.core.m3u8.M3U8Converter
 import com.gemini.filemanager.core.m3u8.M3U8Parser
 import com.gemini.filemanager.core.m3u8.M3U8Scanner
+import com.gemini.filemanager.core.m3u8.M3U8TaskManager
 import com.gemini.filemanager.data.model.M3U8Item
 import com.gemini.filemanager.data.model.M3U8Status
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -40,6 +42,51 @@ class M3U8ViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         scanTasks()
+        observeBackgroundTaskEvents()
+    }
+
+    private fun observeBackgroundTaskEvents() {
+        viewModelScope.launch {
+            M3U8TaskManager.isConverting.collect { converting ->
+                _uiState.update { it.copy(isBatchConverting = converting) }
+            }
+        }
+
+        viewModelScope.launch {
+            M3U8TaskManager.eventFlow.collect { event ->
+                when (event) {
+                    is M3U8ConvertEvent.Progress -> {
+                        updateItemStatus(event.id, M3U8Status.CONVERTING, event.progress, event.speed)
+                    }
+                    is M3U8ConvertEvent.Success -> {
+                        _uiState.update { state ->
+                            state.copy(items = state.items.map {
+                                if (it.id == event.id) {
+                                    it.copy(
+                                        status = M3U8Status.COMPLETED,
+                                        progress = 1.0f,
+                                        outputPath = event.outputFile.absolutePath,
+                                        segmentCount = if (_uiState.value.deleteSourceAfterConvert) 0 else it.segmentCount
+                                    )
+                                } else it
+                            })
+                        }
+                    }
+                    is M3U8ConvertEvent.Error -> {
+                        _uiState.update { state ->
+                            state.copy(items = state.items.map {
+                                if (it.id == event.id) {
+                                    it.copy(
+                                        status = M3U8Status.FAILED,
+                                        errorMessage = event.error
+                                    )
+                                } else it
+                            })
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fun scanTasks() {
@@ -188,58 +235,15 @@ class M3U8ViewModel(application: Application) : AndroidViewModel(application) {
         val selectedItems = _uiState.value.items.filter { _uiState.value.selectedIds.contains(it.id) }
         if (selectedItems.isEmpty()) return
 
-        viewModelScope.launch {
-            _uiState.update { it.copy(isBatchConverting = true) }
+        M3U8TaskManager.startBatchConvert(
+            context = getApplication(),
+            items = selectedItems,
+            deleteSourceAfter = _uiState.value.deleteSourceAfterConvert
+        )
+    }
 
-            for (item in selectedItems) {
-                // 更新为进行中
-                updateItemStatus(item.id, M3U8Status.CONVERTING, 0.05f)
-
-                M3U8Converter.convertM3U8ToMp4(
-                    context = getApplication(),
-                    item = item,
-                    customKeyHex = item.customKeyHex,
-                    listener = object : M3U8Converter.ConvertListener {
-                        override fun onProgress(item: M3U8Item, progress: Float, speed: String, outputSize: Long) {
-                            updateItemStatus(item.id, M3U8Status.CONVERTING, progress, speed)
-                        }
-
-                        override fun onSuccess(item: M3U8Item, outputFile: File) {
-                            if (_uiState.value.deleteSourceAfterConvert) {
-                                deleteSourceFiles(item)
-                            }
-                            _uiState.update { state ->
-                                state.copy(items = state.items.map {
-                                    if (it.id == item.id) {
-                                        it.copy(
-                                            status = M3U8Status.COMPLETED,
-                                            progress = 1.0f,
-                                            outputPath = outputFile.absolutePath,
-                                            segmentCount = if (_uiState.value.deleteSourceAfterConvert) 0 else it.segmentCount
-                                        )
-                                    } else it
-                                })
-                            }
-                        }
-
-                        override fun onError(item: M3U8Item, error: String) {
-                            _uiState.update { state ->
-                                state.copy(items = state.items.map {
-                                    if (it.id == item.id) {
-                                        it.copy(
-                                            status = M3U8Status.FAILED,
-                                            errorMessage = error
-                                        )
-                                    } else it
-                                })
-                            }
-                        }
-                    }
-                )
-            }
-
-            _uiState.update { it.copy(isBatchConverting = false) }
-        }
+    fun cancelConvert() {
+        M3U8TaskManager.cancelAll(getApplication())
     }
 
     private fun updateItemStatus(id: String, status: M3U8Status, progress: Float, speed: String = "") {

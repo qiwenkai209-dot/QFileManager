@@ -143,22 +143,47 @@ fun M3U8ConvertScreen(
                                 Text("全选待转 (${state.selectedIds.size}/$uncompletedCount)")
                             }
 
-                            Button(
-                                onClick = { viewModel.convertSelected() },
-                                enabled = state.selectedIds.isNotEmpty() && !state.isBatchConverting,
-                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
-                            ) {
-                                if (state.isBatchConverting) {
-                                    val convertingItem = state.items.firstOrNull { it.status == M3U8Status.CONVERTING }
-                                    val currentPercent = if (convertingItem != null) (convertingItem.progress * 100).toInt() else 0
-                                    CircularProgressIndicator(
-                                        modifier = Modifier.size(18.dp),
-                                        color = Color.White,
-                                        strokeWidth = 2.dp
-                                    )
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Text("正在转码 $currentPercent%...")
-                                } else {
+                            if (state.isBatchConverting) {
+                                val convertingItem = state.items.firstOrNull { it.status == M3U8Status.CONVERTING }
+                                val currentPercent = if (convertingItem != null) (convertingItem.progress * 100).toInt() else 0
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Surface(
+                                        color = MaterialTheme.colorScheme.primaryContainer,
+                                        shape = RoundedCornerShape(8.dp)
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            CircularProgressIndicator(
+                                                modifier = Modifier.size(14.dp),
+                                                strokeWidth = 2.dp,
+                                                color = MaterialTheme.colorScheme.primary
+                                            )
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Text(
+                                                text = "后台转码中 $currentPercent%",
+                                                fontSize = 12.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = MaterialTheme.colorScheme.onPrimaryContainer
+                                            )
+                                        }
+                                    }
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    OutlinedButton(
+                                        onClick = { viewModel.cancelConvert() },
+                                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                                        shape = RoundedCornerShape(8.dp)
+                                    ) {
+                                        Text("停止", fontSize = 12.sp)
+                                    }
+                                }
+                            } else {
+                                Button(
+                                    onClick = { viewModel.convertSelected() },
+                                    enabled = state.selectedIds.isNotEmpty(),
+                                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                                ) {
                                     Icon(Icons.Default.PlayArrow, contentDescription = null)
                                     Spacer(modifier = Modifier.width(6.dp))
                                     Text("一键批量转码 (${state.selectedIds.size})")
@@ -205,7 +230,7 @@ fun M3U8ConvertScreen(
                     )
                     Spacer(modifier = Modifier.width(12.dp))
                     Text(
-                        text = "已全面支持 QQ 浏览器 / 夸克离线 M3U8；点击条目右侧可自定义导出文件名，点击【预览】可在转码前直接免解密或带密播放测试。",
+                        text = "已全面支持 QQ 浏览器 / 夸克离线 M3U8 深度去重；支持常驻后台转码，退出界面或锁屏仍将继续执行，并在通知栏实时显示进度与速率。",
                         fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         lineHeight = 16.sp

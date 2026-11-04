@@ -18,23 +18,21 @@ object M3U8Scanner {
     private const val TAG = "M3U8Scanner"
 
     /**
-     * 高速轻量扫描 M3U8 任务
+     * 高速轻量扫描 M3U8 任务（内置严格去重机制，杜绝重复项）
      * 每扫描到一批就通过 onBatchFound 回调流式通知 UI，同时返回全部结果
      */
     suspend fun scanLocalM3U8Tasks(
         context: Context? = null,
         onBatchFound: ((List<M3U8Item>) -> Unit)? = null
     ): List<M3U8Item> = withContext(Dispatchers.IO) {
-        val results = mutableListOf<M3U8Item>()
-        val seenPaths = HashSet<String>()
+        // 使用物理目录与输出路径双重规范化去重
+        val candidateItems = mutableListOf<M3U8Item>()
 
         fun addItem(item: M3U8Item) {
-            val key = if (item.m3u8Path.isNotBlank()) item.m3u8Path else item.parentDir
-            if (seenPaths.add(key)) {
-                results.add(item)
-                if (results.size % 5 == 0) {
-                    onBatchFound?.invoke(results.toList())
-                }
+            candidateItems.add(item)
+            if (candidateItems.size % 6 == 0) {
+                val dedupedBatch = deduplicateItems(candidateItems)
+                onBatchFound?.invoke(dedupedBatch)
             }
         }
 
@@ -53,13 +51,63 @@ object M3U8Scanner {
             scanMediaStoreFast(context, ::addItem)
         }
 
-        // 最终排序（将已有 MP4 完成的和按时间/大小排在前面）
-        val sorted = results.sortedWith(
+        // 最终严格深度去重与排序
+        val finalDeduped = deduplicateItems(candidateItems)
+
+        val sorted = finalDeduped.sortedWith(
             compareByDescending<M3U8Item> { it.status == M3U8Status.COMPLETED }
-                .thenByDescending { it.totalSize }
+                .thenByDescending { it.lastModified }
         )
         onBatchFound?.invoke(sorted)
         sorted
+    }
+
+    /**
+     * 多维度深度去重：
+     * 1. 统一解析并使用 canonicalPath（消除 /sdcard 与 /storage/emulated/0 的符号链接重复）
+     * 2. 同一个切片父目录下如果扫描到了多个 .m3u8，仅保留最新修改、分片数量最多的代表项
+     * 3. 同一个已输出的 MP4 文件绝对只保留一个条目
+     */
+    private fun deduplicateItems(items: List<M3U8Item>): List<M3U8Item> {
+        val uniqueMap = LinkedHashMap<String, M3U8Item>()
+
+        for (item in items) {
+            // 计算唯一键标识
+            val canonicalDir = try {
+                File(item.parentDir).canonicalPath.lowercase()
+            } catch (e: Exception) {
+                item.parentDir.lowercase()
+            }
+
+            val canonicalMp4 = if (item.outputPath != null && File(item.outputPath).exists()) {
+                try {
+                    File(item.outputPath).canonicalPath.lowercase()
+                } catch (e: Exception) {
+                    item.outputPath.lowercase()
+                }
+            } else {
+                null
+            }
+
+            // 去重主键：已完成时以 MP4 物理文件为准，未完成时以切片所在父目录为准
+            val dedupKey = canonicalMp4 ?: "dir_$canonicalDir"
+
+            val existing = uniqueMap[dedupKey]
+            if (existing == null) {
+                uniqueMap[dedupKey] = item
+            } else {
+                // 如果已有相同视频，选出更佳的一个（优先保留已完成的、切片数更多的、或更新的）
+                if (existing.status != M3U8Status.COMPLETED && item.status == M3U8Status.COMPLETED) {
+                    uniqueMap[dedupKey] = item
+                } else if (item.segmentCount > existing.segmentCount) {
+                    uniqueMap[dedupKey] = item
+                } else if (item.lastModified > existing.lastModified && item.segmentCount == existing.segmentCount) {
+                    uniqueMap[dedupKey] = item
+                }
+            }
+        }
+
+        return uniqueMap.values.toList()
     }
 
     /**
@@ -162,9 +210,15 @@ object M3U8Scanner {
             var isEncrypted = false
             var segmentDir: File? = null
 
-            // 检查是否已经生成过同名 MP4
+            // 检查是否已经生成过同名 MP4（检查本目录或公共合成目录 Movies/M3U8Converted/）
             val possibleMp4 = File(parentDir, "$title.mp4")
-            val isAlreadyMp4 = possibleMp4.exists() && possibleMp4.length() > 1024 * 1024
+            val standardConvertedMp4 = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES), "M3U8Converted/$title.mp4")
+            val finalMp4 = when {
+                possibleMp4.exists() && possibleMp4.length() > 1024 * 1024 -> possibleMp4
+                standardConvertedMp4.exists() && standardConvertedMp4.length() > 1024 * 1024 -> standardConvertedMp4
+                else -> null
+            }
+            val isAlreadyMp4 = finalMp4 != null
 
             // 快速读取前 20 行提取切片信息
             m3u8File.bufferedReader().useLines { lines ->
@@ -222,7 +276,7 @@ object M3U8Scanner {
             }
 
             if (totalSize == 0L) {
-                totalSize = if (isAlreadyMp4) possibleMp4.length() else m3u8File.length()
+                totalSize = if (isAlreadyMp4 && finalMp4 != null) finalMp4.length() else m3u8File.length()
             }
 
             val fileModified = if (m3u8File.exists() && m3u8File.lastModified() > 0L) {
@@ -240,7 +294,7 @@ object M3U8Scanner {
                 totalSize = totalSize,
                 isEncrypted = isEncrypted,
                 status = if (isAlreadyMp4) M3U8Status.COMPLETED else M3U8Status.PENDING,
-                outputPath = if (isAlreadyMp4) possibleMp4.absolutePath else null,
+                outputPath = finalMp4?.absolutePath,
                 progress = if (isAlreadyMp4) 1.0f else 0.0f,
                 lastModified = fileModified
             )
