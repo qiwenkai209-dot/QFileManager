@@ -24,6 +24,8 @@ data class CleanerUiState(
     val scanCurrentDir: String = "",
     val groups: List<JunkGroup> = emptyList(),
     val installedApps: List<InstalledAppInfo> = emptyList(),
+    val appFilterType: Int = 0, // 0: 全部应用, 1: 第三方应用, 2: 系统应用
+    val searchQuery: String = "",
     val totalJunkBytes: Long = 0L,
     val selectedJunkBytes: Long = 0L,
     val selectedCount: Int = 0,
@@ -42,6 +44,14 @@ class CleanerViewModel(application: Application) : AndroidViewModel(application)
 
     fun setTab(tabIndex: Int) {
         _uiState.update { it.copy(currentTab = tabIndex) }
+    }
+
+    fun setAppFilterType(filterType: Int) {
+        _uiState.update { it.copy(appFilterType = filterType) }
+    }
+
+    fun setSearchQuery(query: String) {
+        _uiState.update { it.copy(searchQuery = query) }
     }
 
     /**
@@ -212,7 +222,7 @@ class CleanerViewModel(application: Application) : AndroidViewModel(application)
     }
 
     /**
-     * 跳转至系统应用详情设置页，供用户一键清除应用缓存和数据
+     * 跳转至系统应用详情设置页，供用户一键清除应用缓存和全部数据
      */
     fun openAppDetails(context: Context, packageName: String) {
         try {
@@ -223,6 +233,52 @@ class CleanerViewModel(application: Application) : AndroidViewModel(application)
             context.startActivity(intent)
         } catch (e: Exception) {
             e.printStackTrace()
+        }
+    }
+
+    /**
+     * 卸载指定的软件应用
+     */
+    fun uninstallApp(context: Context, packageName: String) {
+        try {
+            val intent = Intent(Intent.ACTION_UNINSTALL_PACKAGE).apply {
+                data = Uri.fromParts("package", packageName, null)
+                putExtra(Intent.EXTRA_RETURN_RESULT, true)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(intent)
+        } catch (e: Exception) {
+            try {
+                val intent = Intent(Intent.ACTION_DELETE, Uri.parse("package:$packageName")).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(intent)
+            } catch (err: Exception) {
+                _uiState.update { it.copy(statusMessage = "无法唤起系统卸载: ${err.message}") }
+            }
+        }
+    }
+
+    /**
+     * 删除指定软件在外部存储卡下的所有离线缓存与数据 (Android/data/<pkg> 和 Android/obb/<pkg>)
+     */
+    fun deleteAppExternalData(packageName: String, onFinished: (Long) -> Unit) {
+        viewModelScope.launch {
+            val freed = StorageCleanerEngine.deleteAppExternalData(packageName)
+            _uiState.update { state ->
+                val updatedApps = state.installedApps.map { app ->
+                    if (app.packageName == packageName) {
+                        app.copy(externalDataSize = 0L, externalObbSize = 0L)
+                    } else {
+                        app
+                    }
+                }
+                state.copy(
+                    installedApps = updatedApps,
+                    statusMessage = if (freed > 0) "成功清空该软件的外部缓存与数据，释放了 ${FileUtils.formatFileSize(freed)}！" else "该软件在外部存储卡下暂无额外数据残留"
+                )
+            }
+            onFinished(freed)
         }
     }
 

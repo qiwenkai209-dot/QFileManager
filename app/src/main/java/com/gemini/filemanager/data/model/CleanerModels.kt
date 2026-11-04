@@ -76,7 +76,12 @@ data class InstalledAppInfo(
     val appName: String,
     val versionName: String,
     val apkSize: Long,
+    val externalDataSize: Long = 0L, // Android/data/<pkg> 占用大小
+    val externalObbSize: Long = 0L,  // Android/obb/<pkg> 占用大小
     val isSystemApp: Boolean = false,
     val lastUpdateTime: Long = 0L,
     val icon: Drawable? = null
-)
+) {
+    val totalExternalSize: Long get() = externalDataSize + externalObbSize
+    val totalEstimatedSize: Long get() = apkSize + totalExternalSize
+}

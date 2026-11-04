@@ -1,0 +1,64 @@
+name: Build & Release Android APK
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build Debug APK
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: 17
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Grant Execute Permission to gradlew
+        run: chmod +x gradlew
+
+      - name: Build APK with Gradle
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: QFileManager-v1.0.0-debug
+          path: app/build/outputs/apk/debug/*.apk
+          retention-days: 30
+
+      - name: Create GitHub Release (on main push / manual trigger)
+        if: github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.0-${{ github.run_number }}
+          name: "Q管理 v1.0.0 (Build ${{ github.run_number }})"
+          body: |
+            ### 🚀 Q管理 (QFileManager) 自动构建发布
+            
+            - **Commit**: ${{ github.sha }}
+            - **功能更新**:
+              - 📱 支持扫描手机安装的所有应用（系统+第三方）
+              - 🗑️ 支持一键卸载、清理外部残留数据、一键直达系统清除应用缓存与全部数据
+              - 🧹 本机文件与临时垃圾深度清理（相册缩略图、系统临时文件、日志崩溃包、废弃安装包）
+              - ⚡ M3U8 离线缓存批量嗅探与秒级无损转 MP4（带实时进度与删除源文件）
+              - 🔍 全盘重复文件深度筛查（三阶段高精度流式比对）
+              - 🎬 高级音视频播放器（支持进度条自由拖拽、无黑边全屏铺满与横竖屏旋转）
+              - 📡 开源 LocalSend 协议局域网高速互传
+          files: app/build/outputs/apk/debug/*.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

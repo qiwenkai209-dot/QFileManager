@@ -224,28 +224,126 @@ fun StorageCleanerScreen(
                 }
             } else {
                 // 已安装软件存储管理列表
-                LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 12.dp, bottom = 24.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    item {
-                        Text(
-                            text = "已安装应用空间占用分析 (点击一键直达系统清除缓存)",
-                            fontSize = 13.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(bottom = 4.dp)
+                var appToDeleteDataTarget by remember { mutableStateOf<InstalledAppInfo?>(null) }
+
+                val filteredApps = remember(state.installedApps, state.appFilterType, state.searchQuery) {
+                    state.installedApps.filter { app ->
+                        val matchesType = when (state.appFilterType) {
+                            1 -> !app.isSystemApp
+                            2 -> app.isSystemApp
+                            else -> true
+                        }
+                        val matchesQuery = if (state.searchQuery.isBlank()) true else {
+                            app.appName.contains(state.searchQuery, ignoreCase = true) ||
+                                app.packageName.contains(state.searchQuery, ignoreCase = true)
+                        }
+                        matchesType && matchesQuery
+                    }
+                }
+
+                val userAppCount = remember(state.installedApps) { state.installedApps.count { !it.isSystemApp } }
+                val systemAppCount = remember(state.installedApps) { state.installedApps.count { it.isSystemApp } }
+
+                Column(modifier = Modifier.fillMaxSize()) {
+                    // 搜索与过滤工具栏
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 8.dp)
+                    ) {
+                        OutlinedTextField(
+                            value = state.searchQuery,
+                            onValueChange = { viewModel.setSearchQuery(it) },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(52.dp),
+                            placeholder = { Text("搜索应用名称或包名...", fontSize = 13.sp) },
+                            leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(18.dp)) },
+                            trailingIcon = if (state.searchQuery.isNotEmpty()) {
+                                {
+                                    IconButton(onClick = { viewModel.setSearchQuery("") }) {
+                                        Icon(Icons.Default.Close, contentDescription = "清除", modifier = Modifier.size(16.dp))
+                                    }
+                                }
+                            } else null,
+                            singleLine = true,
+                            shape = RoundedCornerShape(12.dp)
                         )
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            FilterChip(
+                                selected = state.appFilterType == 0,
+                                onClick = { viewModel.setAppFilterType(0) },
+                                label = { Text("全部 (${state.installedApps.size})", fontSize = 12.sp) }
+                            )
+                            FilterChip(
+                                selected = state.appFilterType == 1,
+                                onClick = { viewModel.setAppFilterType(1) },
+                                label = { Text("第三方软件 ($userAppCount)", fontSize = 12.sp) }
+                            )
+                            FilterChip(
+                                selected = state.appFilterType == 2,
+                                onClick = { viewModel.setAppFilterType(2) },
+                                label = { Text("系统应用 ($systemAppCount)", fontSize = 12.sp) }
+                            )
+                        }
                     }
 
-                    items(state.installedApps, key = { it.packageName }) { appInfo ->
-                        InstalledAppCard(
-                            app = appInfo,
-                            onCleanCache = {
-                                viewModel.openAppDetails(context, appInfo.packageName)
-                            }
-                        )
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 40.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        items(filteredApps, key = { it.packageName }) { appInfo ->
+                            InstalledAppCard(
+                                app = appInfo,
+                                onCleanCache = {
+                                    viewModel.openAppDetails(context, appInfo.packageName)
+                                },
+                                onDeleteData = {
+                                    appToDeleteDataTarget = appInfo
+                                },
+                                onUninstall = {
+                                    viewModel.uninstallApp(context, appInfo.packageName)
+                                }
+                            )
+                        }
                     }
+                }
+
+                // 清理软件外部数据确认弹窗
+                appToDeleteDataTarget?.let { targetApp ->
+                    AlertDialog(
+                        onDismissRequest = { appToDeleteDataTarget = null },
+                        icon = { Icon(Icons.Default.FolderDelete, contentDescription = null, tint = MaterialTheme.colorScheme.error) },
+                        title = { Text("清空软件外部数据与缓存？") },
+                        text = {
+                            Text(
+                                "将删除「${targetApp.appName}」在存储卡 Android/data 目录下的离线缓存与存储内容（占用 ${FileUtils.formatFileSize(targetApp.totalExternalSize)}）。\n\n删除后该应用需重新从网络加载必要资源，确认清空吗？"
+                            )
+                        },
+                        confirmButton = {
+                            Button(
+                                onClick = {
+                                    val pkg = targetApp.packageName
+                                    appToDeleteDataTarget = null
+                                    viewModel.deleteAppExternalData(pkg) { freed ->
+                                        Toast.makeText(context, "已释放 ${FileUtils.formatFileSize(freed)} 空间", Toast.LENGTH_SHORT).show()
+                                    }
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                            ) {
+                                Text("确认清空")
+                            }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = { appToDeleteDataTarget = null }) {
+                                Text("取消")
+                            }
+                        }
+                    )
                 }
             }
         }
@@ -528,77 +626,167 @@ fun JunkItemRow(
 }
 
 /**
- * 已安装应用卡片
+ * 已安装应用卡片（支持卸载、清理外部数据、一键清除缓存与全部数据）
  */
 @Composable
 fun InstalledAppCard(
     app: InstalledAppInfo,
-    onCleanCache: () -> Unit
+    onCleanCache: () -> Unit,
+    onDeleteData: () -> Unit,
+    onUninstall: () -> Unit
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(14.dp),
+        shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(14.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            // App 图标
-            val bitmap = remember(app.icon) { app.icon?.let { drawableToBitmap(it) } }
-            if (bitmap != null) {
-                Image(
-                    bitmap = bitmap.asImageBitmap(),
-                    contentDescription = app.appName,
-                    modifier = Modifier
-                        .size(44.dp)
-                        .clip(RoundedCornerShape(10.dp))
-                )
-            } else {
-                Box(
-                    modifier = Modifier
-                        .size(44.dp)
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(MaterialTheme.colorScheme.primaryContainer),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Android,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onPrimaryContainer
+        Column(modifier = Modifier.padding(14.dp)) {
+            // 上半部分：应用图标、名称、包名、标签
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                val bitmap = remember(app.icon) { app.icon?.let { drawableToBitmap(it) } }
+                if (bitmap != null) {
+                    Image(
+                        bitmap = bitmap.asImageBitmap(),
+                        contentDescription = app.appName,
+                        modifier = Modifier
+                            .size(46.dp)
+                            .clip(RoundedCornerShape(10.dp))
                     )
+                } else {
+                    Box(
+                        modifier = Modifier
+                            .size(46.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(MaterialTheme.colorScheme.primaryContainer),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Android,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.width(12.dp))
+
+                Column(modifier = Modifier.weight(1f)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = app.appName,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        if (app.isSystemApp) {
+                            Surface(
+                                color = MaterialTheme.colorScheme.surfaceVariant,
+                                shape = RoundedCornerShape(4.dp)
+                            ) {
+                                Text(
+                                    text = "系统",
+                                    fontSize = 10.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                )
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(2.dp))
+
+                    Text(
+                        text = "包名: ${app.packageName}",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+
+                    Spacer(modifier = Modifier.height(2.dp))
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            text = "安装包: ${FileUtils.formatFileSize(app.apkSize)}",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        if (app.totalExternalSize > 0) {
+                            Text(
+                                text = "外部数据/缓存: ${FileUtils.formatFileSize(app.totalExternalSize)}",
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.primary,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
                 }
             }
 
-            Spacer(modifier = Modifier.width(12.dp))
+            Spacer(modifier = Modifier.height(10.dp))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+            Spacer(modifier = Modifier.height(8.dp))
 
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = app.appName,
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Spacer(modifier = Modifier.height(2.dp))
-                Text(
-                    text = "版本: ${app.versionName} · 安装包: ${FileUtils.formatFileSize(app.apkSize)}",
-                    fontSize = 11.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-
-            OutlinedButton(
-                onClick = onCleanCache,
-                shape = RoundedCornerShape(8.dp),
-                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+            // 下半部分：操作按钮行
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Icon(Icons.Default.CleaningServices, contentDescription = null, modifier = Modifier.size(14.dp))
-                Spacer(modifier = Modifier.width(4.dp))
-                Text("清理缓存", fontSize = 11.sp)
+                // 1. 清空外部数据与缓存（如果存在）
+                if (app.totalExternalSize > 0) {
+                    OutlinedButton(
+                        onClick = onDeleteData,
+                        shape = RoundedCornerShape(8.dp),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                        modifier = Modifier.height(32.dp),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            contentColor = MaterialTheme.colorScheme.error
+                        )
+                    ) {
+                        Icon(Icons.Default.DeleteOutline, contentDescription = null, modifier = Modifier.size(14.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("清外部数据", fontSize = 11.sp)
+                    }
+                    Spacer(modifier = Modifier.width(6.dp))
+                }
+
+                // 2. 直达系统应用详情页清除内部缓存与数据
+                FilledTonalButton(
+                    onClick = onCleanCache,
+                    shape = RoundedCornerShape(8.dp),
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                    modifier = Modifier.height(32.dp)
+                ) {
+                    Icon(Icons.Default.CleaningServices, contentDescription = null, modifier = Modifier.size(14.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("清除缓存/数据", fontSize = 11.sp)
+                }
+
+                // 3. 卸载应用（系统应用除外）
+                if (!app.isSystemApp) {
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Button(
+                        onClick = onUninstall,
+                        shape = RoundedCornerShape(8.dp),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                        modifier = Modifier.height(32.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.errorContainer,
+                            contentColor = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                    ) {
+                        Icon(Icons.Default.DeleteForever, contentDescription = null, modifier = Modifier.size(14.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("卸载", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
             }
         }
     }

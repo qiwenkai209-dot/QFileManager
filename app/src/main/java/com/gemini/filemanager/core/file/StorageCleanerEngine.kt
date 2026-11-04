@@ -287,19 +287,23 @@ object StorageCleanerEngine {
     }
 
     /**
-     * 获取手机已安装的软件信息列表（按 APK 体积降序排列）
+     * 获取手机已安装的所有软件信息列表（包含第三方与系统应用，并统计外部数据占用）
      */
     suspend fun getInstalledApps(context: Context): List<InstalledAppInfo> = withContext(Dispatchers.IO) {
         val list = mutableListOf<InstalledAppInfo>()
+        val externalRoot = Environment.getExternalStorageDirectory()
+        val dataBaseDir = File(externalRoot, "Android/data")
+        val obbBaseDir = File(externalRoot, "Android/obb")
+
         try {
             val pm = context.packageManager
+            // 扫描手机上安装的所有包
             val packages = pm.getInstalledPackages(PackageManager.GET_META_DATA)
 
             for (pkg in packages) {
                 val appInfo = pkg.applicationInfo ?: continue
                 val isSystem = (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0
 
-                // 优先展示第三方应用或用户安装的更新
                 val appName = try {
                     pm.getApplicationLabel(appInfo).toString()
                 } catch (e: Exception) {
@@ -308,6 +312,13 @@ object StorageCleanerEngine {
 
                 val apkFile = File(appInfo.sourceDir)
                 val apkSize = if (apkFile.exists()) apkFile.length() else 0L
+
+                // 统计该 App 在 Android/data/<pkg> 和 Android/obb/<pkg> 的外部存储占用
+                val pkgDataDir = File(dataBaseDir, pkg.packageName)
+                val pkgObbDir = File(obbBaseDir, pkg.packageName)
+                val extDataSize = if (pkgDataDir.exists()) calculateDirectorySize(pkgDataDir) else 0L
+                val extObbSize = if (pkgObbDir.exists()) calculateDirectorySize(pkgObbDir) else 0L
+
                 val icon = try {
                     pm.getApplicationIcon(appInfo)
                 } catch (e: Exception) {
@@ -320,6 +331,8 @@ object StorageCleanerEngine {
                         appName = appName,
                         versionName = pkg.versionName ?: "1.0",
                         apkSize = apkSize,
+                        externalDataSize = extDataSize,
+                        externalObbSize = extObbSize,
                         isSystemApp = isSystem,
                         lastUpdateTime = pkg.lastUpdateTime,
                         icon = icon
@@ -330,11 +343,42 @@ object StorageCleanerEngine {
             e.printStackTrace()
         }
 
-        // 非系统应用排前面，按大小降序
+        // 非系统应用排前面，按综合占用大小降序
         list.sortedWith(
             compareBy<InstalledAppInfo> { it.isSystemApp }
-                .thenByDescending { it.apkSize }
+                .thenByDescending { it.totalEstimatedSize }
         )
+    }
+
+    /**
+     * 删除指定软件在手机存储卡下的全部外部缓存与数据 (Android/data/<pkg> 和 Android/obb/<pkg>)
+     */
+    suspend fun deleteAppExternalData(packageName: String): Long = withContext(Dispatchers.IO) {
+        var freedBytes = 0L
+        val externalRoot = Environment.getExternalStorageDirectory()
+        val targetDirs = listOf(
+            File(externalRoot, "Android/data/$packageName"),
+            File(externalRoot, "Android/obb/$packageName")
+        )
+
+        for (dir in targetDirs) {
+            if (dir.exists()) {
+                val size = calculateDirectorySize(dir)
+                if (dir.deleteRecursively()) {
+                    freedBytes += size
+                }
+            }
+        }
+        freedBytes
+    }
+
+    private fun calculateDirectorySize(dir: File): Long {
+        var size = 0L
+        val files = dir.listFiles() ?: return 0L
+        for (f in files) {
+            size += if (f.isDirectory) calculateDirectorySize(f) else f.length()
+        }
+        return size
     }
 
     /**
