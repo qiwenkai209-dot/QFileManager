@@ -30,6 +30,7 @@ fun HomeScreen(
     onNavigateM3U8: () -> Unit,
     onNavigateLocalSend: () -> Unit,
     onNavigateDuplicate: () -> Unit,
+    onNavigateCleaner: () -> Unit,
     viewModel: HomeViewModel = viewModel()
 ) {
     val state by viewModel.uiState.collectAsState()
@@ -46,7 +47,7 @@ fun HomeScreen(
                             fontWeight = FontWeight.Bold
                         )
                         Text(
-                            text = "智能分类 · M3U8转码 · LocalSend互传",
+                            text = "智能分类 · 存储清理 · M3U8转码 · LocalSend互传",
                             fontSize = 12.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -68,15 +69,16 @@ fun HomeScreen(
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            // 1. 存储状态卡片
+            // 1. 存储状态卡片（带一键去清理入口）
             item {
                 StorageCard(
                     totalBytes = state.totalStorage,
-                    availableBytes = state.availableStorage
+                    availableBytes = state.availableStorage,
+                    onCleanClick = onNavigateCleaner
                 )
             }
 
-            // 2. 特色核心工具专区（M3U8 批量转 MP4 + LocalSend 互传 + 重复文件筛查）
+            // 2. 特色核心工具专区（2x2 黄金功能矩阵）
             item {
                 Text(
                     text = "特色核心工具",
@@ -84,6 +86,30 @@ fun HomeScreen(
                     fontWeight = FontWeight.SemiBold,
                     color = MaterialTheme.colorScheme.primary
                 )
+            }
+
+            item {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    FeatureToolCard(
+                        modifier = Modifier.weight(1f),
+                        title = "软件与存储清理",
+                        subtitle = "缓存与临时残留深度清理",
+                        icon = Icons.Default.CleaningServices,
+                        accentColor = Color(0xFF00897B),
+                        onClick = onNavigateCleaner
+                    )
+                    FeatureToolCard(
+                        modifier = Modifier.weight(1f),
+                        title = "重复文件筛查",
+                        subtitle = "秒级识别重复照片与视频",
+                        icon = Icons.Default.ContentCopy,
+                        accentColor = Color(0xFF673AB7),
+                        onClick = onNavigateDuplicate
+                    )
+                }
             }
 
             item {
@@ -108,16 +134,6 @@ fun HomeScreen(
                         onClick = onNavigateLocalSend
                     )
                 }
-            }
-
-            item {
-                FeatureWideCard(
-                    title = "重复文件筛查",
-                    subtitle = "精准识别重复照片、视频与文件，一键智能瘦身",
-                    icon = Icons.Default.ContentCopy,
-                    accentColor = Color(0xFF673AB7),
-                    onClick = onNavigateDuplicate
-                )
             }
 
             // 3. 基础分类管理
@@ -191,7 +207,11 @@ fun HomeScreen(
 }
 
 @Composable
-fun StorageCard(totalBytes: Long, availableBytes: Long) {
+fun StorageCard(
+    totalBytes: Long,
+    availableBytes: Long,
+    onCleanClick: (() -> Unit)? = null
+) {
     val usedBytes = (totalBytes - availableBytes).coerceAtLeast(0L)
     val usedPercent = if (totalBytes > 0) (usedBytes.toFloat() / totalBytes) else 0f
 
@@ -221,12 +241,26 @@ fun StorageCard(totalBytes: Long, availableBytes: Long) {
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                Text(
-                    text = "${(usedPercent * 100).toInt()}%",
-                    fontSize = 24.sp,
-                    fontWeight = FontWeight.Black,
-                    color = MaterialTheme.colorScheme.primary
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = "${(usedPercent * 100).toInt()}%",
+                        fontSize = 24.sp,
+                        fontWeight = FontWeight.Black,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    if (onCleanClick != null) {
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Button(
+                            onClick = onCleanClick,
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                            shape = RoundedCornerShape(10.dp)
+                        ) {
+                            Icon(Icons.Default.CleaningServices, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("去清理", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
             }
             Spacer(modifier = Modifier.height(16.dp))
             LinearProgressIndicator(

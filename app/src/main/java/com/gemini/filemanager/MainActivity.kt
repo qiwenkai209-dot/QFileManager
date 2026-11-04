@@ -26,6 +26,7 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.gemini.filemanager.data.model.FileCategory
 import com.gemini.filemanager.ui.screens.category.CategoryFileListScreen
+import com.gemini.filemanager.ui.screens.cleaner.StorageCleanerScreen
 import com.gemini.filemanager.ui.screens.duplicate.DuplicateFilesScreen
 import com.gemini.filemanager.ui.screens.home.HomeScreen
 import com.gemini.filemanager.ui.screens.localsend.LocalSendScreen
@@ -177,6 +178,9 @@ fun MainNavigation(initialFiles: List<File> = emptyList()) {
                 },
                 onNavigateDuplicate = {
                     navController.navigate("duplicate")
+                },
+                onNavigateCleaner = {
+                    navController.navigate("cleaner")
                 }
             )
         }
@@ -221,6 +225,12 @@ fun MainNavigation(initialFiles: List<File> = emptyList()) {
 
         composable("duplicate") {
             DuplicateFilesScreen(
+                onBack = { navController.popBackStack() }
+            )
+        }
+
+        composable("cleaner") {
+            StorageCleanerScreen(
                 onBack = { navController.popBackStack() }
             )
         }

@@ -2,22 +2,23 @@
 
 一款基于 **Kotlin + Jetpack Compose (Material 3)** 构建的现代 Android 设备管理器与文件处理利器。
 
-支持六大分类文件深度管理、内置开源 **LocalSend 协议**无损高速局域网互传、集成 **Mobile FFmpeg** 实现手机本地浏览器/视频 App 离线 **M3U8 缓存分片批量智能嗅探与秒级直出合成为 MP4**、支持全盘**重复文件秒级筛查与智能清理**，以及支持**进度条自由拖拽、无黑边铺满全屏和横竖屏旋转**的高级音视频播放器。
+支持六大分类文件深度管理、内置开源 **LocalSend 协议**无损高速局域网互传、集成 **Mobile FFmpeg** 实现手机本地浏览器/视频 App 离线 **M3U8 缓存分片批量智能嗅探与秒级直出合成为 MP4**、支持全盘**软件与本机文件深度清理**、**重复文件秒级筛查与智能清理**，以及支持**进度条自由拖拽、无黑边铺满全屏和横竖屏旋转**的高级音视频播放器。
 
 ---
 
 ## 🌟 核心特性一览
 
-### 1. 智能分类文件管理
-- **全格式支持**：
-  - 📷 **图片**：JPG, PNG, WEBP, GIF, SVG, RAW, HEIC 缩略图极速加载。
-  - 🎵 **音乐**：MP3, FLAC, WAV, AAC, OGG, M4A, APE 等高质量音频检索与信息提取。
-  - 📄 **文档**：PDF, DOC/DOCX, XLS/XLSX, PPT/PPTX, TXT, EPUB, Markdown。
-  - 🎬 **视频**：MP4, MKV, AVI, MOV, FLV, TS 等全格式探测。
-  - 📦 **安装包 (APK)**：深度解析未安装 APK 文件，直接提取真实应用名、高清应用图标、包名及版本号 (VersionName / VersionCode)，支持一键调用系统安装器。
-  - 🗜️ **压缩包 (ZIP/RAR/7Z)**：集成 Zip4j，支持包内文件目录树浏览与一键免解压预览/解压到本地。
-- **批量与全选操作**：支持任意分类下的多选、全选、批量删除、系统分享，以及一键带入 LocalSend 快传发给电脑。
-- **物理文件属性排序**：时间、大小、名称多维度排序，严格按文件真实属性计算。
+### 1. 本机文件与软件深度清理 (Storage & App Cleaner)
+- 🧹 **五大核心垃圾维度深度扫描**：
+  - 💾 **应用与系统临时缓存**：自动识别全盘散落的 `.tmp`, `.temp`, `.chk`, `.bak`, `.old` 等临时垃圾文件；
+  - 🖼️ **相册缩略图与图库缓存**：深度排查 `DCIM/.thumbnails` 与 `Pictures/.thumbnails`，清理海量缓存索引，立竿见影释放数 GB，不损坏相册原图；
+  - 📝 **日志与崩溃转储文件**：扫描清理 `.log`, `.dmp`, `crashlog`, `logs` 等废弃运行堆栈与转储残留；
+  - 📦 **废弃安装包残留**：智能检测存储中的 `.apk` 安装包，自动比对系统已安装软件列表，安全标出“已安装冗余包”；
+  - 📁 **无用空文件夹**：递归扫描卸载应用后留下的空文件夹树，一键清空多余冗余路径。
+- 📱 **已安装软件空间分析与直达清理**：
+  - 全面列出手机已安装的所有第三方应用及系统更新，按占用体积降序排序；
+  - 展示 App 高清图标、真实名称、包名、版本及安装包占用大小；
+  - **一键直达系统清除缓存**：点击即可快速唤起系统应用详情设置页，支持用户一键清除应用缓存与管理存储空间。
 
 ---
 
@@ -65,7 +66,20 @@
 
 ---
 
-### 5. 开源 LocalSend 协议局域网互传
+### 5. 智能分类文件管理
+- **全格式支持**：
+  - 📷 **图片**：JPG, PNG, WEBP, GIF, SVG, RAW, HEIC 缩略图极速加载。
+  - 🎵 **音乐**：MP3, FLAC, WAV, AAC, OGG, M4A, APE 等高质量音频检索与信息提取。
+  - 📄 **文档**：PDF, DOC/DOCX, XLS/XLSX, PPT/PPTX, TXT, EPUB, Markdown。
+  - 🎬 **视频**：MP4, MKV, AVI, MOV, FLV, TS 等全格式探测。
+  - 📦 **安装包 (APK)**：深度解析未安装 APK 文件，直接提取真实应用名、高清应用图标、包名及版本号 (VersionName / VersionCode)，支持一键调用系统安装器。
+  - 🗜️ **压缩包 (ZIP/RAR/7Z)**：集成 Zip4j，支持包内文件目录树浏览与一键免解压预览/解压到本地。
+- **批量与全选操作**：支持任意分类下的多选、全选、批量删除、系统分享，以及一键带入 LocalSend 快传发给电脑。
+- **物理文件属性排序**：时间、大小、名称多维度排序，严格按文件真实属性计算。
+
+---
+
+### 6. 开源 LocalSend 协议局域网互传
 原生兼容开源 [LocalSend 协议 (Protocol v2)](https://github.com/localsend/localsend)，可直接与局域网内的 Windows、macOS、Linux、iOS 以及 Android 官方 LocalSend 客户端无缝互传：
 - 📡 **UDP 组播自动发现 (Multicast Discovery)**：
   - 监听与广播组播地址 `224.0.0.167:53317`，秒级雷达探测周围设备。
@@ -81,6 +95,7 @@
 | 模块 | 技术选型 | 说明 |
 |---|---|---|
 | UI 框架 | Jetpack Compose + Material 3 | 现代化声明式响应式界面 |
+| 清理引擎 | StorageCleanerEngine (System Junk & App Manager) | 全盘深度扫描、图库缩略图、多格式过滤与 App 存储分析 |
 | 视频处理 | FFmpeg-Kit (Mobile-FFmpeg) | 本地多线程解封装与秒级无损合并 |
 | 局域网传输 | LocalSend Protocol v2 (OkHttp + NanoHTTPD) | 开源跨平台无损局域网快传 |
 | 去重引擎 | MessageDigest (MD5 Streaming) + Multi-stage filter | 三阶段流式比对防 OOM |
