@@ -69,19 +69,31 @@ data class JunkGroup(
 }
 
 /**
- * 已安装应用存储信息
+ * 已安装应用存储与清理详情
  */
 data class InstalledAppInfo(
     val packageName: String,
     val appName: String,
     val versionName: String,
     val apkSize: Long,
-    val externalDataSize: Long = 0L, // Android/data/<pkg> 占用大小
-    val externalObbSize: Long = 0L,  // Android/obb/<pkg> 占用大小
+    val dataSize: Long = 0L,         // 应用内部数据大小 (需使用情况访问权限)
+    val cacheSize: Long = 0L,        // 应用内部缓存大小 (需使用情况访问权限)
+    val externalDataSize: Long = 0L, // Android/data/<pkg> 外部数据占用大小
+    val externalObbSize: Long = 0L,  // Android/obb/<pkg> 外部扩展包大小
+    val externalMediaSize: Long = 0L,// Android/media/<pkg> 关联媒体文件大小
     val isSystemApp: Boolean = false,
     val lastUpdateTime: Long = 0L,
+    val hasUsageStatsPermission: Boolean = false,
+    val isSelected: Boolean = false,
     val icon: Drawable? = null
 ) {
-    val totalExternalSize: Long get() = externalDataSize + externalObbSize
-    val totalEstimatedSize: Long get() = apkSize + totalExternalSize
+    val totalExternalSize: Long get() = externalDataSize + externalObbSize + externalMediaSize
+    val totalDataSize: Long get() = dataSize + totalExternalSize
+    val totalCacheSize: Long get() = cacheSize
+    val totalEstimatedSize: Long
+        get() = if (hasUsageStatsPermission) {
+            apkSize + dataSize + cacheSize + totalExternalSize
+        } else {
+            apkSize + totalExternalSize
+        }
 }

@@ -24,14 +24,25 @@ data class CleanerUiState(
     val scanCurrentDir: String = "",
     val groups: List<JunkGroup> = emptyList(),
     val installedApps: List<InstalledAppInfo> = emptyList(),
-    val appFilterType: Int = 0, // 0: 全部应用, 1: 第三方应用, 2: 系统应用
+    val appFilterType: Int = 1, // 0: 全部应用, 1: 用户安装软件(第三方), 2: 系统应用 (默认展示用户软件更聚焦)
+    val appSortType: Int = 0,   // 0: 占用大小降序, 1: 更新时间降序, 2: 名称升序
     val searchQuery: String = "",
+    val hasUsageStatsPermission: Boolean = false,
     val totalJunkBytes: Long = 0L,
     val selectedJunkBytes: Long = 0L,
     val selectedCount: Int = 0,
-    val currentTab: Int = 0, // 0: 垃圾清理, 1: 应用管理
+    val currentTab: Int = 0, // 0: 软件应用管理, 1: 全盘垃圾深度清理
     val statusMessage: String? = null
-)
+) {
+    val selectedApps: List<InstalledAppInfo>
+        get() = installedApps.filter { it.isSelected }
+
+    val selectedAppCount: Int
+        get() = selectedApps.size
+
+    val selectedAppsTotalExternalBytes: Long
+        get() = selectedApps.sumOf { it.totalExternalSize }
+}
 
 class CleanerViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -50,31 +61,78 @@ class CleanerViewModel(application: Application) : AndroidViewModel(application)
         _uiState.update { it.copy(appFilterType = filterType) }
     }
 
+    fun setAppSortType(sortType: Int) {
+        _uiState.update { it.copy(appSortType = sortType) }
+    }
+
     fun setSearchQuery(query: String) {
         _uiState.update { it.copy(searchQuery = query) }
     }
 
     /**
-     * 启动全面垃圾与应用扫描
+     * 检查并刷新使用情况权限状态
+     */
+    fun checkPermissionAndRefresh() {
+        val hasPermission = StorageCleanerEngine.hasUsageStatsPermission(getApplication())
+        _uiState.update { it.copy(hasUsageStatsPermission = hasPermission) }
+        if (hasPermission) {
+            // 重新刷新已安装软件获取精确空间
+            viewModelScope.launch {
+                val apps = StorageCleanerEngine.getInstalledApps(getApplication())
+                _uiState.update { it.copy(installedApps = apps) }
+            }
+        }
+    }
+
+    /**
+     * 跳转至系统的使用情况授权页面
+     */
+    fun openUsageAccessSettings(context: Context) {
+        try {
+            val intent = Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(intent)
+        } catch (e: Exception) {
+            try {
+                val intent = Intent(Settings.ACTION_SETTINGS).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(intent)
+            } catch (err: Exception) {
+                _uiState.update { it.copy(statusMessage = "无法打开设置页面") }
+            }
+        }
+    }
+
+    /**
+     * 启动全面软件与全盘垃圾扫描
      */
     fun startScan() {
+        val hasPermission = StorageCleanerEngine.hasUsageStatsPermission(getApplication())
         _uiState.update {
             it.copy(
                 isScanning = true,
-                scanStage = "正在初始化扫描引擎...",
+                scanStage = "正在扫描手机上安装的所有软件...",
                 scanCurrentDir = "",
                 groups = emptyList(),
+                hasUsageStatsPermission = hasPermission,
                 statusMessage = null
             )
         }
 
         viewModelScope.launch {
             try {
-                // 扫描已安装 App
+                // 1. 扫描手机上安装的所有 App (包含第三方与系统应用，深度统计占用)
                 val apps = StorageCleanerEngine.getInstalledApps(getApplication())
-                _uiState.update { it.copy(installedApps = apps) }
+                _uiState.update {
+                    it.copy(
+                        installedApps = apps,
+                        scanStage = "已识别 ${apps.size} 款软件，正在扫描全盘垃圾..."
+                    )
+                }
 
-                // 全盘扫描垃圾文件
+                // 2. 全盘扫描垃圾文件
                 val groups = StorageCleanerEngine.scanJunkFiles(
                     context = getApplication(),
                     callback = object : StorageCleanerEngine.CleanerScanCallback {
@@ -113,6 +171,65 @@ class CleanerViewModel(application: Application) : AndroidViewModel(application)
                     )
                 }
             }
+        }
+    }
+
+    /**
+     * 切换单个软件的多选选中状态
+     */
+    fun toggleAppSelect(packageName: String) {
+        _uiState.update { state ->
+            val updated = state.installedApps.map { app ->
+                if (app.packageName == packageName) app.copy(isSelected = !app.isSelected) else app
+            }
+            state.copy(installedApps = updated)
+        }
+    }
+
+    /**
+     * 全选或全不选应用
+     */
+    fun selectAllApps(select: Boolean) {
+        _uiState.update { state ->
+            val updated = state.installedApps.map { it.copy(isSelected = select) }
+            state.copy(installedApps = updated)
+        }
+    }
+
+    /**
+     * 批量清空勾选软件的外部残留数据与缓存
+     */
+    fun batchDeleteSelectedAppsExternalData(onFinished: (Int, Long) -> Unit) {
+        val selected = _uiState.value.selectedApps
+        if (selected.isEmpty()) return
+
+        viewModelScope.launch {
+            var totalFreed = 0L
+            var successCount = 0
+            for (app in selected) {
+                val freed = StorageCleanerEngine.deleteAppExternalData(app.packageName)
+                if (freed > 0) {
+                    totalFreed += freed
+                    successCount++
+                }
+            }
+
+            // 更新状态
+            _uiState.update { state ->
+                val updatedApps = state.installedApps.map { app ->
+                    if (app.isSelected) {
+                        app.copy(externalDataSize = 0L, externalObbSize = 0L, externalMediaSize = 0L, isSelected = false)
+                    } else {
+                        app
+                    }
+                }
+                state.copy(
+                    installedApps = updatedApps,
+                    statusMessage = "批量清理完成！共释放了 ${FileUtils.formatFileSize(totalFreed)} 存储空间！"
+                )
+            }
+
+            onFinished(successCount, totalFreed)
         }
     }
 
@@ -166,7 +283,7 @@ class CleanerViewModel(application: Application) : AndroidViewModel(application)
     }
 
     /**
-     * 全选所有或全不选
+     * 全选所有垃圾项或全不选
      */
     fun selectAll(select: Boolean) {
         _uiState.update { state ->
@@ -179,7 +296,7 @@ class CleanerViewModel(application: Application) : AndroidViewModel(application)
     }
 
     /**
-     * 执行物理安全清理
+     * 执行物理安全清理垃圾文件
      */
     fun cleanSelected(onFinished: (Int, Long) -> Unit) {
         val currentGroups = _uiState.value.groups
@@ -260,7 +377,7 @@ class CleanerViewModel(application: Application) : AndroidViewModel(application)
     }
 
     /**
-     * 删除指定软件在外部存储卡下的所有离线缓存与数据 (Android/data/<pkg> 和 Android/obb/<pkg>)
+     * 删除指定软件在外部存储卡下的所有离线缓存与数据 (Android/data/<pkg>, Android/obb/<pkg> 和关联目录)
      */
     fun deleteAppExternalData(packageName: String, onFinished: (Long) -> Unit) {
         viewModelScope.launch {
@@ -268,7 +385,7 @@ class CleanerViewModel(application: Application) : AndroidViewModel(application)
             _uiState.update { state ->
                 val updatedApps = state.installedApps.map { app ->
                     if (app.packageName == packageName) {
-                        app.copy(externalDataSize = 0L, externalObbSize = 0L)
+                        app.copy(externalDataSize = 0L, externalObbSize = 0L, externalMediaSize = 0L)
                     } else {
                         app
                     }

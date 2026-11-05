@@ -16,10 +16,11 @@
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
 
-    <!-- APK 安装与卸载权限，支持手机全部应用扫描 -->
+    <!-- APK 安装与卸载权限，支持手机全部应用扫描与存储统计 -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" tools:ignore="QueryAllPackages" />
+    <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS" tools:ignore="ProtectedPermissions" />
 
     <!-- 前台服务与通知（用于大文件传输和M3U8批量转码防后台杀进程） -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
