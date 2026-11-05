@@ -306,6 +306,27 @@ object StorageCleanerEngine {
     }
 
     /**
+     * 国内主流高频应用包名嗅探库（用于在厂商ROM拦截getInstalledPackages枚举时作为兜底补充）
+     */
+    private val POPULAR_PACKAGES = setOf(
+        "com.tencent.mm", "com.tencent.mobileqq", "com.eg.android.AlipayGphone",
+        "com.taobao.taobao", "com.ss.android.ugc.aweme", "com.ss.android.ugc.aweme.lite",
+        "com.kuaishou.nebula", "com.smile.gifmaker", "com.jingdong.app.mall",
+        "com.sankuai.meituan", "com.xunmeng.pinduoduo", "tv.danmaku.bili",
+        "com.bilibili.app.in", "com.zhihu.android", "com.sina.weibo",
+        "com.netease.cloudmusic", "com.kugou.android", "com.tencent.qqmusic",
+        "com.quark.browser", "com.tencent.mtt", "com.UCMobile", "com.baidu.searchbox",
+        "com.autonavi.minimap", "com.baidu.BaiduMap", "com.coolapk.market",
+        "com.qiyi.video", "com.youku.phone", "com.tencent.qqlive", "com.baidu.netdisk",
+        "com.xingin.xhs", "com.lemon.lv", "com.ss.android.ugc.cut", "com.dewu.app",
+        "com.dragon.read", "com.kmxs.reader", "com.xiaomi.smarthome", "com.mi.health",
+        "com.miui.player", "com.miui.video", "com.miui.notes", "com.miui.calculator",
+        "com.miui.weather2", "com.miui.compass", "com.miui.screenrecorder",
+        "com.android.camera", "com.android.deskclock", "com.android.calendar",
+        "com.android.contacts", "com.android.mms", "com.android.settings"
+    )
+
+    /**
      * 获取手机已安装的所有软件信息列表（包含第三方与系统应用，深度统计真实代码、内部数据、内部缓存与外部数据占用）
      */
     suspend fun getInstalledApps(context: Context): List<InstalledAppInfo> = withContext(Dispatchers.IO) {
@@ -321,76 +342,150 @@ object StorageCleanerEngine {
         } else null
 
         val myUserHandle = Process.myUserHandle()
+        val pm = context.packageManager
 
+        // 收集所有已安装软件的包名（多通道混合收集，突破厂商系统对单一 getInstalledPackages 的拦截）
+        val packageMap = mutableMapOf<String, android.content.pm.PackageInfo>()
+
+        // 通道 1: pm.getInstalledPackages(0)
         try {
-            val pm = context.packageManager
-            // 扫描手机上安装的所有包 (MATCH_ALL / 0 获取最全列表)
-            val packages = pm.getInstalledPackages(0)
+            val directPackages = pm.getInstalledPackages(0)
+            for (pkg in directPackages) {
+                packageMap[pkg.packageName] = pkg
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
 
-            for (pkg in packages) {
-                val appInfo = pkg.applicationInfo ?: continue
-                val isSystem = (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0
-
-                val appName = try {
-                    pm.getApplicationLabel(appInfo).toString()
-                } catch (e: Exception) {
-                    pkg.packageName
-                }
-
-                val apkFile = File(appInfo.sourceDir)
-                var apkSize = if (apkFile.exists()) apkFile.length() else 0L
-                var internalDataSize = 0L
-                var internalCacheSize = 0L
-
-                // 若已获得使用情况权限，使用官方 StorageStatsManager 读取精准的代码、缓存与数据大小
-                if (storageStatsManager != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        // 通道 2: pm.getInstalledApplications(0)
+        try {
+            val apps = pm.getInstalledApplications(0)
+            for (app in apps) {
+                if (!packageMap.containsKey(app.packageName)) {
                     try {
-                        val stats = storageStatsManager.queryStatsForPackage(
-                            StorageManager.UUID_DEFAULT,
-                            pkg.packageName,
-                            myUserHandle
-                        )
+                        val p = pm.getPackageInfo(app.packageName, 0)
+                        packageMap[app.packageName] = p
+                    } catch (ignored: Exception) {}
+                }
+            }
+        } catch (ignored: Exception) {}
+
+        // 通道 3: 查询所有桌面启动器 Launcher 活动
+        try {
+            val launcherIntent = android.content.Intent(android.content.Intent.ACTION_MAIN).apply {
+                addCategory(android.content.Intent.CATEGORY_LAUNCHER)
+            }
+            val resolveInfos = pm.queryIntentActivities(launcherIntent, 0)
+            for (ri in resolveInfos) {
+                val pkgName = ri.activityInfo?.packageName ?: continue
+                if (!packageMap.containsKey(pkgName)) {
+                    try {
+                        val p = pm.getPackageInfo(pkgName, 0)
+                        packageMap[pkgName] = p
+                    } catch (ignored: Exception) {}
+                }
+            }
+        } catch (ignored: Exception) {}
+
+        // 通道 4: 扫描存储卡 Android/data 与 Android/obb 目录名（各软件的物理存在证据，100% 挖掘真实包名）
+        try {
+            val candidateDirs = listOf(dataBaseDir, obbBaseDir, mediaBaseDir)
+            for (baseDir in candidateDirs) {
+                val subDirs = baseDir.listFiles() ?: continue
+                for (sub in subDirs) {
+                    val name = sub.name
+                    if (name.contains(".") && !packageMap.containsKey(name)) {
+                        try {
+                            val p = pm.getPackageInfo(name, 0)
+                            packageMap[name] = p
+                        } catch (ignored: Exception) {}
+                    }
+                }
+            }
+        } catch (ignored: Exception) {}
+
+        // 通道 5: 若识别到的包数仍然过少（<= 3），启动主流高频应用嗅探补充
+        if (packageMap.size <= 3) {
+            for (popPkg in POPULAR_PACKAGES) {
+                if (!packageMap.containsKey(popPkg)) {
+                    try {
+                        val p = pm.getPackageInfo(popPkg, 0)
+                        packageMap[popPkg] = p
+                    } catch (ignored: Exception) {}
+                }
+            }
+        }
+
+        // 统一解析组装 InstalledAppInfo
+        for ((pkgName, pkg) in packageMap) {
+            val appInfo = pkg.applicationInfo ?: continue
+            val isSystem = (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0
+
+            val appName = try {
+                pm.getApplicationLabel(appInfo).toString()
+            } catch (e: Exception) {
+                pkgName
+            }
+
+            val apkFile = File(appInfo.sourceDir)
+            var apkSize = if (apkFile.exists()) apkFile.length() else 0L
+            var internalDataSize = 0L
+            var internalCacheSize = 0L
+
+            // 若已获得使用情况权限，使用官方 StorageStatsManager 读取精准的代码、缓存与下载/数据空间大小
+            if (storageStatsManager != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                var querySuccess = false
+                try {
+                    val uuid = try { appInfo.storageUuid } catch (e: Exception) { StorageManager.UUID_DEFAULT }
+                    val stats = storageStatsManager.queryStatsForPackage(uuid, pkgName, myUserHandle)
+                    apkSize = stats.appBytes
+                    internalDataSize = stats.dataBytes
+                    internalCacheSize = stats.cacheBytes
+                    querySuccess = true
+                } catch (e: Exception) {}
+
+                if (!querySuccess) {
+                    try {
+                        val stats = storageStatsManager.queryStatsForPackage(StorageManager.UUID_DEFAULT, pkgName, myUserHandle)
                         apkSize = stats.appBytes
                         internalDataSize = stats.dataBytes
                         internalCacheSize = stats.cacheBytes
                     } catch (ignored: Exception) {}
                 }
-
-                // 统计该 App 在 Android/data/<pkg>、Android/obb/<pkg>、Android/media/<pkg> 的外部存储占用
-                val pkgDataDir = File(dataBaseDir, pkg.packageName)
-                val pkgObbDir = File(obbBaseDir, pkg.packageName)
-                val pkgMediaDir = File(mediaBaseDir, pkg.packageName)
-
-                val extDataSize = if (pkgDataDir.exists()) calculateDirectorySize(pkgDataDir) else 0L
-                val extObbSize = if (pkgObbDir.exists()) calculateDirectorySize(pkgObbDir) else 0L
-                val extMediaSize = if (pkgMediaDir.exists()) calculateDirectorySize(pkgMediaDir) else 0L
-
-                val icon = try {
-                    pm.getApplicationIcon(appInfo)
-                } catch (e: Exception) {
-                    null
-                }
-
-                list.add(
-                    InstalledAppInfo(
-                        packageName = pkg.packageName,
-                        appName = appName,
-                        versionName = pkg.versionName ?: "1.0",
-                        apkSize = apkSize,
-                        dataSize = internalDataSize,
-                        cacheSize = internalCacheSize,
-                        externalDataSize = extDataSize,
-                        externalObbSize = extObbSize,
-                        externalMediaSize = extMediaSize,
-                        isSystemApp = isSystem,
-                        lastUpdateTime = pkg.lastUpdateTime,
-                        hasUsageStatsPermission = hasStatsPermission,
-                        icon = icon
-                    )
-                )
             }
-        } catch (e: Exception) {
-            e.printStackTrace()
+
+            // 统计该 App 在 Android/data/<pkg>、Android/obb/<pkg>、Android/media/<pkg> 的外部存储占用
+            val pkgDataDir = File(dataBaseDir, pkgName)
+            val pkgObbDir = File(obbBaseDir, pkgName)
+            val pkgMediaDir = File(mediaBaseDir, pkgName)
+
+            val extDataSize = if (pkgDataDir.exists()) calculateDirectorySize(pkgDataDir) else 0L
+            val extObbSize = if (pkgObbDir.exists()) calculateDirectorySize(pkgObbDir) else 0L
+            val extMediaSize = if (pkgMediaDir.exists()) calculateDirectorySize(pkgMediaDir) else 0L
+
+            val icon = try {
+                pm.getApplicationIcon(appInfo)
+            } catch (e: Exception) {
+                null
+            }
+
+            list.add(
+                InstalledAppInfo(
+                    packageName = pkgName,
+                    appName = appName,
+                    versionName = pkg.versionName ?: "1.0",
+                    apkSize = apkSize,
+                    dataSize = internalDataSize,
+                    cacheSize = internalCacheSize,
+                    externalDataSize = extDataSize,
+                    externalObbSize = extObbSize,
+                    externalMediaSize = extMediaSize,
+                    isSystemApp = isSystem,
+                    lastUpdateTime = pkg.lastUpdateTime,
+                    hasUsageStatsPermission = hasStatsPermission,
+                    icon = icon
+                )
+            )
         }
 
         // 非系统应用（第三方软件）排前面，按综合占用大小降序

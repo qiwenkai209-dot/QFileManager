@@ -21,6 +21,20 @@
     <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" tools:ignore="QueryAllPackages" />
     <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS" tools:ignore="ProtectedPermissions" />
+    <uses-permission android:name="android.permission.GET_INSTALLED_APPS" />
+    <uses-permission android:name="com.miui.permission.GET_INSTALLED_APPS" />
+
+    <!-- 声明查询规则，保障在 Android 11+ 上可见已安装的应用 -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <category android:name="android.intent.category.BROWSABLE" />
+            <data android:scheme="https" />
+        </intent>
+    </queries>
 
     <!-- 前台服务与通知（用于大文件传输和M3U8批量转码防后台杀进程） -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />

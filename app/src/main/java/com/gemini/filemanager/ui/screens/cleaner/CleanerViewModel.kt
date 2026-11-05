@@ -85,6 +85,30 @@ class CleanerViewModel(application: Application) : AndroidViewModel(application)
     }
 
     /**
+     * 跳转至手机权限管理页，指导用户开启「读取应用列表」权限（针对小米 MIUI/HyperOS 等定制系统）
+     */
+    fun openAppListPermissionSettings(context: Context) {
+        try {
+            val intent = Intent("miui.intent.action.APP_PERM_EDITOR").apply {
+                setClassName("com.miui.securitycenter", "com.miui.permcenter.permissions.PermissionsEditorActivity")
+                putExtra("extra_pkgname", context.packageName)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(intent)
+        } catch (e: Exception) {
+            try {
+                val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                    data = Uri.fromParts("package", context.packageName, null)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(intent)
+            } catch (err: Exception) {
+                _uiState.update { it.copy(statusMessage = "无法打开权限设置页") }
+            }
+        }
+    }
+
+    /**
      * 跳转至系统的使用情况授权页面
      */
     fun openUsageAccessSettings(context: Context) {

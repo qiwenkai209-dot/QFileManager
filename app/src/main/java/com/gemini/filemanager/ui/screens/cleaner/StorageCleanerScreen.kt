@@ -54,6 +54,19 @@ fun StorageCleanerScreen(
     var appToDeleteDataTarget by remember { mutableStateOf<InstalledAppInfo?>(null) }
     var showBatchDeleteDialog by remember { mutableStateOf(false) }
 
+    val lifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                viewModel.checkPermissionAndRefresh()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
+
     LaunchedEffect(Unit) {
         viewModel.checkPermissionAndRefresh()
     }
@@ -250,7 +263,53 @@ fun StorageCleanerScreen(
                 totalStorageUsed = state.installedApps.sumOf { it.totalEstimatedSize }
             )
 
-            // 2. 权限提示横幅 (若未开启使用情况访问)
+            // 2. 小米/厂商应用列表权限拦截提示 (若扫描到的应用数过少 <= 3)
+            if (!state.isScanning && state.installedApps.size <= 3) {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.85f)),
+                    shape = RoundedCornerShape(14.dp)
+                ) {
+                    Column(modifier = Modifier.padding(14.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.Security, contentDescription = null, tint = MaterialTheme.colorScheme.error)
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "系统限制了读取应用列表",
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onErrorContainer
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "小米等厂商系统默认对应用列表返回空白信息。请点击下方按钮，在权限管理中将「读取应用列表」设置为【允许】，即可立即扫描并管理手机上的全部软件！",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.9f)
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(
+                                onClick = { viewModel.openAppListPermissionSettings(context) },
+                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                            ) {
+                                Text("去开启「读取应用列表」", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            }
+                            OutlinedButton(
+                                onClick = { viewModel.startScan() },
+                                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                            ) {
+                                Text("刷新重试", fontSize = 12.sp)
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 3. 权限提示横幅 (若未开启使用情况访问)
             if (!state.hasUsageStatsPermission) {
                 Card(
                     modifier = Modifier
@@ -743,29 +802,45 @@ fun InstalledAppCard(
                 Spacer(modifier = Modifier.width(10.dp))
 
                 Column(modifier = Modifier.weight(1f)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            text = app.appName,
-                            fontSize = 15.sp,
-                            fontWeight = FontWeight.Bold,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier.weight(1f, fill = false)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        if (app.isSystemApp) {
-                            Surface(
-                                color = MaterialTheme.colorScheme.surfaceVariant,
-                                shape = RoundedCornerShape(4.dp)
-                            ) {
-                                Text(
-                                    text = "系统预置",
-                                    fontSize = 10.sp,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
-                                )
+                        ) {
+                            Text(
+                                text = app.appName,
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            if (app.isSystemApp) {
+                                Surface(
+                                    color = MaterialTheme.colorScheme.surfaceVariant,
+                                    shape = RoundedCornerShape(4.dp)
+                                ) {
+                                    Text(
+                                        text = "系统预置",
+                                        fontSize = 10.sp,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                    )
+                                }
                             }
                         }
+
+                        // 右上角醒目大号总空间
+                        Text(
+                            text = FileUtils.formatFileSize(app.totalEstimatedSize),
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Black,
+                            color = MaterialTheme.colorScheme.primary
+                        )
                     }
 
                     Spacer(modifier = Modifier.height(2.dp))
@@ -778,34 +853,52 @@ fun InstalledAppCard(
                         overflow = TextOverflow.Ellipsis
                     )
 
-                    Spacer(modifier = Modifier.height(4.dp))
+                    Spacer(modifier = Modifier.height(6.dp))
 
-                    // 空间占用明细标签行
+                    // 空间占用明细标签行（清晰呈现软件下载使用的空间、缓存、安装本体）
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
+                        // 1. 数据与下载使用的空间 (重点突出)
+                        if (app.totalDataSize > 0) {
+                            Surface(
+                                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f),
+                                shape = RoundedCornerShape(6.dp)
+                            ) {
+                                Text(
+                                    text = "数据/下载: ${FileUtils.formatFileSize(app.totalDataSize)}",
+                                    fontSize = 10.sp,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                                )
+                            }
+                        }
+
+                        // 2. 缓存空间
+                        if (app.cacheSize > 0) {
+                            Surface(
+                                color = Color(0xFFFFE0B2),
+                                shape = RoundedCornerShape(6.dp)
+                            ) {
+                                Text(
+                                    text = "缓存: ${FileUtils.formatFileSize(app.cacheSize)}",
+                                    fontSize = 10.sp,
+                                    color = Color(0xFFE65100),
+                                    fontWeight = FontWeight.SemiBold,
+                                    modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                                )
+                            }
+                        }
+
+                        // 3. 安装包本体大小
                         Text(
-                            text = "代码: ${FileUtils.formatFileSize(app.apkSize)}",
-                            fontSize = 11.sp,
+                            text = "本体: ${FileUtils.formatFileSize(app.apkSize)}",
+                            fontSize = 10.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
-                        if (app.cacheSize > 0) {
-                            Text(
-                                text = "缓存: ${FileUtils.formatFileSize(app.cacheSize)}",
-                                fontSize = 11.sp,
-                                color = Color(0xFFE65100),
-                                fontWeight = FontWeight.SemiBold
-                            )
-                        }
-                        if (app.totalExternalSize > 0) {
-                            Text(
-                                text = "外部数据: ${FileUtils.formatFileSize(app.totalExternalSize)}",
-                                fontSize = 11.sp,
-                                color = MaterialTheme.colorScheme.primary,
-                                fontWeight = FontWeight.SemiBold
-                            )
-                        }
                     }
                 }
             }

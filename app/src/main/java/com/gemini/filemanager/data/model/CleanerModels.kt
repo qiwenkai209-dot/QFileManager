@@ -88,11 +88,12 @@ data class InstalledAppInfo(
     val icon: Drawable? = null
 ) {
     val totalExternalSize: Long get() = externalDataSize + externalObbSize + externalMediaSize
-    val totalDataSize: Long get() = dataSize + totalExternalSize
+    val totalDataSize: Long get() = if (dataSize > 0) dataSize else totalExternalSize
     val totalCacheSize: Long get() = cacheSize
     val totalEstimatedSize: Long
-        get() = if (hasUsageStatsPermission) {
-            apkSize + dataSize + cacheSize + totalExternalSize
+        get() = if (hasUsageStatsPermission && (dataSize > 0 || cacheSize > 0)) {
+            // 系统 StorageStats 的 dataBytes 通常包含数据和外部私有数据，直接相加保障不漏
+            maxOf(apkSize + dataSize + totalExternalSize, apkSize + cacheSize + totalExternalSize)
         } else {
             apkSize + totalExternalSize
         }
