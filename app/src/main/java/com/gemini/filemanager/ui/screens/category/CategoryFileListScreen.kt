@@ -35,6 +35,7 @@ fun CategoryFileListScreen(
     category: FileCategory,
     onBack: () -> Unit,
     onSendViaLocalSend: (List<File>) -> Unit,
+    onUploadToSmb: (List<File>) -> Unit = {},
     viewModel: CategoryViewModel = viewModel()
 ) {
     val context = LocalContext.current
@@ -132,6 +133,17 @@ fun CategoryFileListScreen(
                             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                 Icon(Icons.Default.NearMe, contentDescription = "快传", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
                                 Text("快传", fontSize = 10.sp)
+                            }
+                        }
+
+                        // 上传到 SMB
+                        IconButton(onClick = {
+                            val files = viewModel.getSelectedFiles()
+                            onUploadToSmb(files)
+                        }) {
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                Icon(Icons.Default.FolderShared, contentDescription = "SMB", tint = Color(0xFF3F51B5), modifier = Modifier.size(20.dp))
+                                Text("SMB", fontSize = 10.sp)
                             }
                         }
 

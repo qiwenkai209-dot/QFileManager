@@ -53,15 +53,26 @@ import java.io.File
 
 @Composable
 fun VideoPlayerDialog(
-    videoFile: File,
-    title: String = videoFile.name,
+    videoFile: File? = null,
+    videoUri: Uri? = null,
+    title: String = videoFile?.name ?: "媒体播放",
+    fileSizeBytes: Long = videoFile?.length() ?: 0L,
     isAudio: Boolean = false,
+    onExternalOpen: (() -> Unit)? = null,
     onDismissRequest: () -> Unit
 ) {
+    val resolvedUri = remember(videoFile, videoUri) {
+        videoUri ?: videoFile?.let { Uri.fromFile(it) }
+    }
+    if (resolvedUri == null) {
+        LaunchedEffect(Unit) { onDismissRequest() }
+        return
+    }
     val context = LocalContext.current
     val activity = context as? Activity
 
     var isPlaying by remember { mutableStateOf(true) }
+    var isBuffering by remember { mutableStateOf(true) }
     var duration by remember { mutableStateOf(0) }
     var currentPosition by remember { mutableStateOf(0) }
     var isFullScreen by remember { mutableStateOf(false) }
@@ -258,8 +269,16 @@ fun VideoPlayerDialog(
                                         Icon(Icons.Default.Fullscreen, contentDescription = "全屏播放")
                                     }
                                 }
-                                IconButton(onClick = { FileUtils.openFile(context, videoFile) }) {
-                                    Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = "系统播放器打开", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                                if (videoFile != null || onExternalOpen != null) {
+                                    IconButton(onClick = {
+                                        if (videoFile != null) {
+                                            FileUtils.openFile(context, videoFile)
+                                        } else {
+                                            onExternalOpen?.invoke()
+                                        }
+                                    }) {
+                                        Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = "系统播放器打开", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
                                 }
                                 IconButton(onClick = onDismissRequest) {
                                     Icon(Icons.Default.Close, contentDescription = "关闭")
@@ -274,15 +293,22 @@ fun VideoPlayerDialog(
                     if (isAudio) {
                         // 音频播放器样式
                         AudioPlayerView(
-                            videoFile = videoFile,
+                            audioUri = resolvedUri,
+                            fileSizeBytes = fileSizeBytes,
                             isPlaying = isPlaying,
                             rotation = rotation,
                             onPlayerReady = { mp ->
                                 mediaPlayerRef = mp
                                 duration = mp.duration
+                                isBuffering = false
                                 isPlaying = true
                             },
-                            onCompletion = { isPlaying = false }
+                            onCompletion = { isPlaying = false },
+                            onError = {
+                                isBuffering = false
+                                isPlaying = false
+                                Toast.makeText(context, "音频加载失败或暂不支持该格式", Toast.LENGTH_SHORT).show()
+                            }
                         )
                     } else {
                         // 视频播放器样式（支持自适应与铺满全屏、双击切换）
@@ -314,14 +340,29 @@ fun VideoPlayerDialog(
                                 AndroidView(
                                     factory = { ctx ->
                                         VideoView(ctx).apply {
-                                            setVideoURI(Uri.fromFile(videoFile))
+                                            setVideoURI(resolvedUri)
                                             setOnPreparedListener { mp ->
                                                 duration = duration.coerceAtLeast(mp.duration)
                                                 videoWidth = mp.videoWidth
                                                 videoHeight = mp.videoHeight
                                                 mp.isLooping = true
+                                                isBuffering = false
                                                 start()
                                                 isPlaying = true
+                                            }
+                                            setOnInfoListener { _, what, _ ->
+                                                when (what) {
+                                                    MediaPlayer.MEDIA_INFO_BUFFERING_START -> isBuffering = true
+                                                    MediaPlayer.MEDIA_INFO_BUFFERING_END,
+                                                    MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START -> isBuffering = false
+                                                }
+                                                false
+                                            }
+                                            setOnErrorListener { _, _, _ ->
+                                                isBuffering = false
+                                                isPlaying = false
+                                                Toast.makeText(ctx, "播放器暂不支持此格式或网络流中断", Toast.LENGTH_SHORT).show()
+                                                true
                                             }
                                             setOnCompletionListener {
                                                 isPlaying = false
@@ -331,6 +372,10 @@ fun VideoPlayerDialog(
                                     },
                                     modifier = Modifier.fillMaxSize()
                                 )
+                            }
+
+                            if (isBuffering) {
+                                CircularProgressIndicator(color = Color.White)
                             }
 
                             // 触摸手势交互层：单击显隐控制栏，双击快速在【铺满全屏】与【适应屏幕】之间切换
@@ -390,6 +435,7 @@ fun VideoPlayerDialog(
                             currentPosition = currentPosition,
                             duration = duration,
                             videoFile = videoFile,
+                            onExternalOpen = onExternalOpen,
                             isCropFill = isCropFill,
                             onToggleCropFill = {
                                 isCropFill = !isCropFill
@@ -427,11 +473,13 @@ fun VideoPlayerDialog(
 
 @Composable
 fun AudioPlayerView(
-    videoFile: File,
+    audioUri: Uri,
+    fileSizeBytes: Long,
     isPlaying: Boolean,
     rotation: Float,
     onPlayerReady: (MediaPlayer) -> Unit,
-    onCompletion: () -> Unit
+    onCompletion: () -> Unit,
+    onError: () -> Unit = {}
 ) {
     Box(
         modifier = Modifier
@@ -460,25 +508,31 @@ fun AudioPlayerView(
                     modifier = Modifier.size(44.dp)
                 )
             }
-            Spacer(modifier = Modifier.height(10.dp))
-            Text(
-                text = FileUtils.formatFileSize(videoFile.length()),
-                fontSize = 12.sp,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+            if (fileSizeBytes > 0L) {
+                Spacer(modifier = Modifier.height(10.dp))
+                Text(
+                    text = FileUtils.formatFileSize(fileSizeBytes),
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
         }
 
         AndroidView(
             factory = { ctx ->
                 android.view.View(ctx).apply {
                     val mp = MediaPlayer().apply {
-                        setDataSource(ctx, Uri.fromFile(videoFile))
+                        setDataSource(ctx, audioUri)
                         setOnPreparedListener { player ->
                             onPlayerReady(player)
                             player.start()
                         }
                         setOnCompletionListener {
                             onCompletion()
+                        }
+                        setOnErrorListener { _, _, _ ->
+                            onError()
+                            true
                         }
                         prepareAsync()
                     }
@@ -495,7 +549,8 @@ fun FullScreenOverlayControls(
     isPlaying: Boolean,
     currentPosition: Int,
     duration: Int,
-    videoFile: File,
+    videoFile: File? = null,
+    onExternalOpen: (() -> Unit)? = null,
     isCropFill: Boolean,
     onToggleCropFill: () -> Unit,
     onToggleOrientation: () -> Unit,
@@ -555,8 +610,16 @@ fun FullScreenOverlayControls(
             }
 
             // 外部系统播放器打开
-            IconButton(onClick = { FileUtils.openFile(context, videoFile) }) {
-                Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = "外部播放", tint = Color.White)
+            if (videoFile != null || onExternalOpen != null) {
+                IconButton(onClick = {
+                    if (videoFile != null) {
+                        FileUtils.openFile(context, videoFile)
+                    } else {
+                        onExternalOpen?.invoke()
+                    }
+                }) {
+                    Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = "外部播放", tint = Color.White)
+                }
             }
         }
 

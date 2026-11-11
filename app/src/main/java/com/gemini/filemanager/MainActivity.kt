@@ -31,6 +31,7 @@ import com.gemini.filemanager.ui.screens.duplicate.DuplicateFilesScreen
 import com.gemini.filemanager.ui.screens.home.HomeScreen
 import com.gemini.filemanager.ui.screens.localsend.LocalSendScreen
 import com.gemini.filemanager.ui.screens.m3u8.M3U8ConvertScreen
+import com.gemini.filemanager.ui.screens.smb.SmbScreen
 import com.gemini.filemanager.ui.theme.AndroidFileManagerTheme
 import java.io.File
 
@@ -159,6 +160,7 @@ fun PermissionGuideScreen(onRequestPermission: () -> Unit) {
 fun MainNavigation(initialFiles: List<File> = emptyList()) {
     val navController = rememberNavController()
     var targetTransmitFiles by remember { mutableStateOf(initialFiles) }
+    var targetSmbUploadFiles by remember { mutableStateOf<List<File>>(emptyList()) }
 
     NavHost(
         navController = navController,
@@ -175,6 +177,10 @@ fun MainNavigation(initialFiles: List<File> = emptyList()) {
                 onNavigateLocalSend = {
                     targetTransmitFiles = emptyList()
                     navController.navigate("localsend")
+                },
+                onNavigateSmb = {
+                    targetSmbUploadFiles = emptyList()
+                    navController.navigate("smb")
                 },
                 onNavigateDuplicate = {
                     navController.navigate("duplicate")
@@ -202,6 +208,10 @@ fun MainNavigation(initialFiles: List<File> = emptyList()) {
                 onSendViaLocalSend = { files ->
                     targetTransmitFiles = files
                     navController.navigate("localsend")
+                },
+                onUploadToSmb = { files ->
+                    targetSmbUploadFiles = files
+                    navController.navigate("smb")
                 }
             )
         }
@@ -219,6 +229,13 @@ fun MainNavigation(initialFiles: List<File> = emptyList()) {
         composable("localsend") {
             LocalSendScreen(
                 initialFiles = targetTransmitFiles,
+                onBack = { navController.popBackStack() }
+            )
+        }
+
+        composable("smb") {
+            SmbScreen(
+                initialUploadFiles = targetSmbUploadFiles,
                 onBack = { navController.popBackStack() }
             )
         }

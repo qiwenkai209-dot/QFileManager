@@ -29,12 +29,17 @@ fun HomeScreen(
     onNavigateCategory: (FileCategory) -> Unit,
     onNavigateM3U8: () -> Unit,
     onNavigateLocalSend: () -> Unit,
+    onNavigateSmb: () -> Unit,
     onNavigateDuplicate: () -> Unit,
     onNavigateCleaner: () -> Unit,
     viewModel: HomeViewModel = viewModel()
 ) {
     val state by viewModel.uiState.collectAsState()
     val discoveredDevices by viewModel.discoveredDevices.collectAsState()
+
+    LaunchedEffect(Unit) {
+        viewModel.refreshSmbCount()
+    }
 
     Scaffold(
         topBar = {
@@ -47,7 +52,7 @@ fun HomeScreen(
                             fontWeight = FontWeight.Bold
                         )
                         Text(
-                            text = "智能分类 · 存储清理 · M3U8转码 · LocalSend互传",
+                            text = "智能分类 · 存储清理 · M3U8转码 · SMB/LocalSend",
                             fontSize = 12.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -134,6 +139,20 @@ fun HomeScreen(
                         onClick = onNavigateLocalSend
                     )
                 }
+            }
+
+            item {
+                FeatureWideCard(
+                    title = "SMB 局域网网络共享",
+                    subtitle = if (state.savedSmbCount > 0) {
+                        "已保存 ${state.savedSmbCount} 台共享主机 · 支持 SMB1/2/3 与在线播片"
+                    } else {
+                        "直连 Windows / macOS / NAS 共享目录，支持传输与在线看片"
+                    },
+                    icon = Icons.Default.FolderShared,
+                    accentColor = Color(0xFF3F51B5),
+                    onClick = onNavigateSmb
+                )
             }
 
             // 3. 基础分类管理

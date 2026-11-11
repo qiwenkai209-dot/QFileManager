@@ -8,4 +8,5 @@
     <string name="category_zip">压缩包</string>
     <string name="m3u8_tool_name">M3U8批量转MP4</string>
     <string name="localsend_tool_name">LocalSend互传</string>
+    <string name="smb_tool_name">SMB局域网共享</string>
 </resources>

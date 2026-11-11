@@ -50,6 +50,11 @@ android {
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
+            excludes += "/META-INF/LICENSE*"
+            excludes += "/META-INF/NOTICE*"
+            excludes += "/META-INF/DEPENDENCIES"
+            excludes += "/META-INF/INDEX.LIST"
+            excludes += "/META-INF/versions/*/OSGI-INF/MANIFEST.MF"
         }
     }
 }
@@ -91,6 +96,10 @@ dependencies {
 
     // DocumentFile for SAF
     implementation("androidx.documentfile:documentfile:1.0.1")
+
+    // SMB1/SMB2/SMB3 client (CodeLibs JCIFS) + Android SLF4J 2.0 binding
+    implementation("org.codelibs:jcifs:3.0.4")
+    implementation("uk.uuid.slf4j:slf4j-android:2.0.17-0")
 
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.1.5")

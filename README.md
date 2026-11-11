@@ -90,6 +90,15 @@
 
 ---
 
+### 7. SMB 局域网网络共享 (SMB1 / SMB2 / SMB3)
+内置 **CodeLibs JCIFS** 协议引擎，支持直连 Windows、macOS、Linux Samba、OpenWrt 及 NAS（群晖/威联通/飞牛等）共享文件夹：
+- 🔍 **局域网双模探测**：同时结合 **445 端口并发扫描**与 **mDNS (`_smb._tcp.`)** 服务发现，自动列出局域网可连接设备。
+- 🔐 **全版本协议与凭证支持**：支持 `SMB1 ~ SMB3.1.1` 加密协商、账号密码 / 域控 / 匿名访客登录，支持保存常用主机配置及手动直连共享目录。
+- 🎬 **本地 HTTP Range 代理在线看片**：通过内置 NanoHTTPD Range 流媒体代理，无需等待下载即可直接流式播放远程视频与音乐，支持进度条拖拽与全屏铺满；支持远程图片在线预览与文档缓存打开。
+- 📂 **全套远程文件操作**：支持远程目录面包屑导航、搜索排序、新建文件夹、重命名、复制/剪切/粘贴、递归删除，以及多文件双向高速上传与下载（本地保存至 `Download/SMB/`）。
+
+---
+
 ## 🛠️ 项目工程技术栈
 
 | 模块 | 技术选型 | 说明 |
@@ -98,6 +107,7 @@
 | 清理引擎 | StorageCleanerEngine (System Junk & App Manager) | 全盘深度扫描、图库缩略图、多格式过滤与 App 存储分析 |
 | 视频处理 | FFmpeg-Kit (Mobile-FFmpeg) | 本地多线程解封装与秒级无损合并 |
 | 局域网传输 | LocalSend Protocol v2 (OkHttp + NanoHTTPD) | 开源跨平台无损局域网快传 |
+| 网络共享 | CodeLibs JCIFS (SMB1/2/3) + NanoHTTPD Range Proxy | 局域网 SMB 文件管理与音视频流式播放 |
 | 去重引擎 | MessageDigest (MD5 Streaming) + Multi-stage filter | 三阶段流式比对防 OOM |
 | 压缩解压 | Zip4j | 跨平台 ZIP/RAR 目录树与解压 |
 | 架构设计 | MVVM + StateFlow + Coroutines | 异步非阻塞响应式架构 |

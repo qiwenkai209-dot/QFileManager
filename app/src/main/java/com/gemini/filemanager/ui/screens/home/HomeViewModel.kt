@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.gemini.filemanager.core.file.FileScanner
 import com.gemini.filemanager.core.localsend.LocalSendManager
 import com.gemini.filemanager.core.m3u8.M3U8Scanner
+import com.gemini.filemanager.core.smb.SmbConnectionStore
 import com.gemini.filemanager.data.model.DiscoveredDevice
 import com.gemini.filemanager.data.model.FileCategory
 import kotlinx.coroutines.Dispatchers
@@ -22,11 +23,13 @@ data class HomeUiState(
     val categoryCounts: Map<FileCategory, Int> = emptyMap(),
     val cachedM3U8Count: Int = 0,
     val discoveredDevicesCount: Int = 0,
+    val savedSmbCount: Int = 0,
     val isLoading: Boolean = false
 )
 
 class HomeViewModel(application: Application) : AndroidViewModel(application) {
 
+    private val smbStore = SmbConnectionStore(application)
     private val _uiState = MutableStateFlow(HomeUiState())
     val uiState: StateFlow<HomeUiState> = _uiState.asStateFlow()
 
@@ -36,7 +39,14 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
         loadOverview()
     }
 
+    fun refreshSmbCount() {
+        _uiState.value = _uiState.value.copy(
+            savedSmbCount = smbStore.getConnections().size
+        )
+    }
+
     fun loadOverview() {
+        refreshSmbCount()
         viewModelScope.launch {
             // 1. 立即获取存储容量（毫秒级直出，绝不受任何扫描影响）
             val overview = withContext(Dispatchers.IO) {
