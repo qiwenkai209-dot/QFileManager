@@ -7,10 +7,13 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -47,6 +50,7 @@ fun SmbConnectionEditorDialog(
     prefillHost: String = "",
     prefillName: String = "",
     prefillPort: Int = 445,
+    onTestConnection: (SmbConnectionConfig, (Boolean, String) -> Unit) -> Unit,
     onDismiss: () -> Unit,
     onSave: (SmbConnectionConfig, Boolean) -> Unit
 ) {
@@ -61,6 +65,9 @@ fun SmbConnectionEditorDialog(
     var showHiddenShares by remember { mutableStateOf(initialConfig?.showHiddenShares ?: false) }
     var protocolMode by remember { mutableStateOf(initialConfig?.protocolMode ?: SmbProtocolMode.AUTO) }
     var showPassword by remember { mutableStateOf(false) }
+
+    var isTesting by remember { mutableStateOf(false) }
+    var testResult by remember { mutableStateOf<Pair<Boolean, String>?>(null) }
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -80,7 +87,10 @@ fun SmbConnectionEditorDialog(
             ) {
                 OutlinedTextField(
                     value = host,
-                    onValueChange = { host = it },
+                    onValueChange = {
+                        host = it
+                        testResult = null
+                    },
                     label = { Text("服务器 IP 或主机名 *") },
                     placeholder = { Text("例如 192.168.1.100") },
                     singleLine = true,
@@ -98,7 +108,10 @@ fun SmbConnectionEditorDialog(
                     )
                     OutlinedTextField(
                         value = portText,
-                        onValueChange = { portText = it.filter { ch -> ch.isDigit() } },
+                        onValueChange = {
+                            portText = it.filter { ch -> ch.isDigit() }
+                            testResult = null
+                        },
                         label = { Text("端口") },
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
@@ -108,7 +121,10 @@ fun SmbConnectionEditorDialog(
 
                 OutlinedTextField(
                     value = shareName,
-                    onValueChange = { shareName = it },
+                    onValueChange = {
+                        shareName = it
+                        testResult = null
+                    },
                     label = { Text("指定共享目录 (留空自动枚举)") },
                     placeholder = { Text("如 Public / Movies") },
                     singleLine = true,
@@ -128,13 +144,22 @@ fun SmbConnectionEditorDialog(
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
-                    Switch(checked = isGuest, onCheckedChange = { isGuest = it })
+                    Switch(
+                        checked = isGuest,
+                        onCheckedChange = {
+                            isGuest = it
+                            testResult = null
+                        }
+                    )
                 }
 
                 if (!isGuest) {
                     OutlinedTextField(
                         value = username,
-                        onValueChange = { username = it },
+                        onValueChange = {
+                            username = it
+                            testResult = null
+                        },
                         label = { Text("用户名") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
@@ -142,7 +167,10 @@ fun SmbConnectionEditorDialog(
 
                     OutlinedTextField(
                         value = password,
-                        onValueChange = { password = it },
+                        onValueChange = {
+                            password = it
+                            testResult = null
+                        },
                         label = { Text("密码") },
                         singleLine = true,
                         visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
@@ -159,7 +187,10 @@ fun SmbConnectionEditorDialog(
 
                     OutlinedTextField(
                         value = domain,
-                        onValueChange = { domain = it },
+                        onValueChange = {
+                            domain = it
+                            testResult = null
+                        },
                         label = { Text("域 / 工作组 (通常留空)") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
@@ -178,13 +209,19 @@ fun SmbConnectionEditorDialog(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clip(RoundedCornerShape(8.dp))
-                                .clickable { protocolMode = mode }
+                                .clickable {
+                                    protocolMode = mode
+                                    testResult = null
+                                }
                                 .padding(vertical = 4.dp, horizontal = 4.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             RadioButton(
                                 selected = protocolMode == mode,
-                                onClick = { protocolMode = mode }
+                                onClick = {
+                                    protocolMode = mode
+                                    testResult = null
+                                }
                             )
                             Spacer(modifier = Modifier.width(6.dp))
                             Text(mode.displayName, fontSize = 13.sp)
@@ -206,6 +243,59 @@ fun SmbConnectionEditorDialog(
                         )
                     }
                     Switch(checked = showHiddenShares, onCheckedChange = { showHiddenShares = it })
+                }
+
+                // 快速测试连接按钮与状态反馈
+                OutlinedButton(
+                    enabled = host.isNotBlank() && !isTesting,
+                    onClick = {
+                        isTesting = true
+                        testResult = null
+                        val probeConfig = buildConfig(
+                            initialConfig,
+                            displayName,
+                            host,
+                            portText,
+                            shareName,
+                            domain,
+                            username,
+                            password,
+                            isGuest,
+                            protocolMode,
+                            showHiddenShares
+                        )
+                        onTestConnection(probeConfig) { ok, msg ->
+                            isTesting = false
+                            testResult = ok to msg
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    if (isTesting) {
+                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("正在探测连接...")
+                    } else {
+                        Icon(Icons.Default.NetworkCheck, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("测试连接")
+                    }
+                }
+
+                if (testResult != null) {
+                    val (ok, msg) = testResult!!
+                    Surface(
+                        color = if (ok) Color(0xFF00897B).copy(alpha = 0.14f) else MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.6f),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = msg,
+                            fontSize = 12.sp,
+                            color = if (ok) Color(0xFF00695C) else MaterialTheme.colorScheme.error,
+                            modifier = Modifier.padding(10.dp)
+                        )
+                    }
                 }
             }
         },
@@ -297,35 +387,73 @@ private fun buildConfig(
 fun SmbTransferListDialog(
     tasks: List<SmbTransferTask>,
     downloadDirPath: String,
+    onPauseTask: (String) -> Unit,
+    onResumeTask: (String) -> Unit,
+    onCancelTask: (String) -> Unit,
+    onPauseAll: () -> Unit,
+    onResumeAll: () -> Unit,
     onClearFinished: () -> Unit,
     onDismiss: () -> Unit
 ) {
+    val hasActive = tasks.any { it.isActive }
+    val hasResumable = tasks.any { it.canResume }
+    val hasFinished = tasks.any {
+        it.status == SmbTransferStatus.COMPLETED || it.status == SmbTransferStatus.CANCELLED
+    }
+
     AlertDialog(
         onDismissRequest = onDismiss,
         title = {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+            Column {
                 Text("SMB 传输队列 (${tasks.size})", fontSize = 18.sp, fontWeight = FontWeight.Bold)
-                if (tasks.any { it.status != SmbTransferStatus.TRANSFERRING && it.status != SmbTransferStatus.WAITING }) {
-                    TextButton(onClick = onClearFinished) {
-                        Text("清理已完成", fontSize = 12.sp)
-                    }
-                }
-            }
-        },
-        text = {
-            Column(modifier = Modifier.fillMaxWidth()) {
                 Text(
-                    text = "本地下载目录：$downloadDirPath",
+                    text = "支持断点续传 · 本地保存至 $downloadDirPath",
                     fontSize = 11.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis
                 )
-                Spacer(modifier = Modifier.height(10.dp))
+            }
+        },
+        text = {
+            Column(modifier = Modifier.fillMaxWidth()) {
+                if (hasActive || hasResumable || hasFinished) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        if (hasActive) {
+                            OutlinedButton(
+                                onClick = onPauseAll,
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                            ) {
+                                Icon(Icons.Default.Pause, contentDescription = null, modifier = Modifier.size(14.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("全部暂停", fontSize = 11.sp)
+                            }
+                        }
+                        if (hasResumable) {
+                            Button(
+                                onClick = onResumeAll,
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                            ) {
+                                Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(14.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("全部续传", fontSize = 11.sp)
+                            }
+                        }
+                        if (hasFinished) {
+                            TextButton(
+                                onClick = onClearFinished,
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                            ) {
+                                Text("清理已完成", fontSize = 11.sp)
+                            }
+                        }
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                }
+
                 if (tasks.isEmpty()) {
                     Box(
                         modifier = Modifier
@@ -339,11 +467,16 @@ fun SmbTransferListDialog(
                     LazyColumn(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .heightIn(max = 360.dp),
+                            .heightIn(max = 380.dp),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         items(tasks.reversed(), key = { it.id }) { task ->
-                            SmbTransferTaskCard(task = task)
+                            SmbTransferTaskCard(
+                                task = task,
+                                onPause = { onPauseTask(task.id) },
+                                onResume = { onResumeTask(task.id) },
+                                onCancel = { onCancelTask(task.id) }
+                            )
                         }
                     }
                 }
@@ -358,7 +491,14 @@ fun SmbTransferListDialog(
 }
 
 @Composable
-fun SmbTransferTaskCard(task: SmbTransferTask) {
+fun SmbTransferTaskCard(
+    task: SmbTransferTask,
+    onPause: () -> Unit,
+    onResume: () -> Unit,
+    onCancel: () -> Unit
+) {
+    val context = LocalContext.current
+
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(12.dp),
@@ -384,32 +524,97 @@ fun SmbTransferTaskCard(task: SmbTransferTask) {
                     modifier = Modifier.size(18.dp)
                 )
                 Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = task.fileName,
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Medium,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f)
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                val statusText = when (task.status) {
-                    SmbTransferStatus.COMPLETED -> "已完成"
-                    SmbTransferStatus.FAILED -> "失败"
-                    SmbTransferStatus.CANCELLED -> "已取消"
-                    else -> if (task.speed.isNotBlank()) task.speed else "${(task.progress * 100).toInt()}%"
-                }
-                Text(
-                    text = statusText,
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = when (task.status) {
-                        SmbTransferStatus.COMPLETED -> Color(0xFF00897B)
-                        SmbTransferStatus.FAILED -> MaterialTheme.colorScheme.error
-                        else -> MaterialTheme.colorScheme.primary
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = task.fileName,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    val pct = (task.progress * 100).toInt()
+                    val statusText = when (task.status) {
+                        SmbTransferStatus.WAITING -> "排队中..."
+                        SmbTransferStatus.TRANSFERRING -> if (task.speed.isNotBlank()) "$pct% · ${task.speed}" else "$pct%"
+                        SmbTransferStatus.PAUSED -> "已暂停 ($pct% · 可断点续传)"
+                        SmbTransferStatus.COMPLETED -> "已完成"
+                        SmbTransferStatus.FAILED -> "传输中断 ($pct% · 可续传)"
+                        SmbTransferStatus.CANCELLED -> "已取消"
                     }
-                )
+                    Text(
+                        text = statusText,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = when (task.status) {
+                            SmbTransferStatus.COMPLETED -> Color(0xFF00897B)
+                            SmbTransferStatus.PAUSED -> Color(0xFFEF6C00)
+                            SmbTransferStatus.FAILED -> MaterialTheme.colorScheme.error
+                            else -> MaterialTheme.colorScheme.primary
+                        }
+                    )
+                }
+
+                when {
+                    task.isActive -> {
+                        IconButton(onClick = onPause, modifier = Modifier.size(32.dp)) {
+                            Icon(Icons.Default.Pause, contentDescription = "暂停", modifier = Modifier.size(18.dp))
+                        }
+                        IconButton(onClick = onCancel, modifier = Modifier.size(32.dp)) {
+                            Icon(
+                                Icons.Default.Close,
+                                contentDescription = "取消并清理",
+                                tint = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
+                    task.canResume -> {
+                        IconButton(onClick = onResume, modifier = Modifier.size(32.dp)) {
+                            Icon(
+                                Icons.Default.PlayArrow,
+                                contentDescription = "断点续传",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                        IconButton(onClick = onCancel, modifier = Modifier.size(32.dp)) {
+                            Icon(
+                                Icons.Default.Close,
+                                contentDescription = "取消并清理",
+                                tint = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
+                    task.status == SmbTransferStatus.COMPLETED -> {
+                        if (task.direction == SmbTransferDirection.DOWNLOAD) {
+                            val localFile = remember(task.localPath) { File(task.localPath) }
+                            if (localFile.exists()) {
+                                IconButton(
+                                    onClick = { FileUtils.openFile(context, localFile) },
+                                    modifier = Modifier.size(32.dp)
+                                ) {
+                                    Icon(
+                                        Icons.AutoMirrored.Filled.OpenInNew,
+                                        contentDescription = "打开",
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(17.dp)
+                                    )
+                                }
+                            }
+                        }
+                        IconButton(onClick = onCancel, modifier = Modifier.size(32.dp)) {
+                            Icon(
+                                Icons.Default.Close,
+                                contentDescription = "移除记录",
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                    }
+                }
             }
+
             if (!task.errorMessage.isNullOrBlank()) {
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
@@ -418,23 +623,29 @@ fun SmbTransferTaskCard(task: SmbTransferTask) {
                     color = MaterialTheme.colorScheme.error,
                     maxLines = 2
                 )
-            } else {
-                Spacer(modifier = Modifier.height(6.dp))
-                LinearProgressIndicator(
-                    progress = { task.progress.coerceIn(0f, 1f) },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(4.dp)
-                        .clip(RoundedCornerShape(2.dp))
-                )
-                if (task.size > 0L) {
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = "${FileUtils.formatFileSize(task.bytesTransferred)} / ${FileUtils.formatFileSize(task.size)}",
-                        fontSize = 10.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+            }
+
+            Spacer(modifier = Modifier.height(6.dp))
+            LinearProgressIndicator(
+                progress = { task.progress.coerceIn(0f, 1f) },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(4.dp)
+                    .clip(RoundedCornerShape(2.dp)),
+                color = when (task.status) {
+                    SmbTransferStatus.PAUSED -> Color(0xFFEF6C00)
+                    SmbTransferStatus.FAILED -> MaterialTheme.colorScheme.error
+                    SmbTransferStatus.COMPLETED -> Color(0xFF00897B)
+                    else -> MaterialTheme.colorScheme.primary
                 }
+            )
+            if (task.size > 0L) {
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "${FileUtils.formatFileSize(task.bytesTransferred)} / ${FileUtils.formatFileSize(task.size)}",
+                    fontSize = 10.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         }
     }
@@ -442,12 +653,40 @@ fun SmbTransferTaskCard(task: SmbTransferTask) {
 
 @Composable
 fun SmbImagePreviewDialog(
-    imageFile: File,
-    remoteItem: SmbRemoteFile,
-    onDownloadToLocal: () -> Unit,
+    initialFile: File,
+    imageItems: List<SmbRemoteFile>,
+    initialIndex: Int,
+    onLoadImage: (SmbRemoteFile, onLoaded: (File) -> Unit, onError: (String) -> Unit) -> Unit,
+    onDownloadToLocal: (SmbRemoteFile) -> Unit,
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
+    var currentIndex by remember(initialIndex) {
+        mutableIntStateOf(initialIndex.coerceIn(0, (imageItems.size - 1).coerceAtLeast(0)))
+    }
+    var currentFile by remember(initialFile) { mutableStateOf(initialFile) }
+    var isLoadingNext by remember { mutableStateOf(false) }
+
+    val currentItem = imageItems.getOrNull(currentIndex) ?: return
+
+    fun switchTo(targetIdx: Int) {
+        if (targetIdx !in imageItems.indices || isLoadingNext) return
+        val nextItem = imageItems[targetIdx]
+        isLoadingNext = true
+        onLoadImage(
+            nextItem,
+            { loadedFile ->
+                currentIndex = targetIdx
+                currentFile = loadedFile
+                isLoadingNext = false
+            },
+            { err ->
+                isLoadingNext = false
+                Toast.makeText(context, err, Toast.LENGTH_SHORT).show()
+            }
+        )
+    }
+
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false)
@@ -458,17 +697,29 @@ fun SmbImagePreviewDialog(
         ) {
             Box(modifier = Modifier.fillMaxSize()) {
                 AsyncImage(
-                    model = imageFile,
-                    contentDescription = remoteItem.name,
+                    model = currentFile,
+                    contentDescription = currentItem.name,
                     contentScale = ContentScale.Fit,
                     modifier = Modifier.fillMaxSize()
                 )
 
+                if (isLoadingNext) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(Color.Black.copy(alpha = 0.4f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        CircularProgressIndicator(color = Color.White)
+                    }
+                }
+
+                // 顶部栏
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .align(Alignment.TopCenter)
-                        .background(Color.Black.copy(alpha = 0.55f))
+                        .background(Color.Black.copy(alpha = 0.6f))
                         .padding(horizontal = 12.dp, vertical = 10.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -477,7 +728,7 @@ fun SmbImagePreviewDialog(
                     }
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
-                            text = remoteItem.name,
+                            text = currentItem.name,
                             color = Color.White,
                             fontSize = 15.sp,
                             fontWeight = FontWeight.Bold,
@@ -485,19 +736,49 @@ fun SmbImagePreviewDialog(
                             overflow = TextOverflow.Ellipsis
                         )
                         Text(
-                            text = FileUtils.formatFileSize(remoteItem.size),
+                            text = "${currentIndex + 1} / ${imageItems.size} · ${FileUtils.formatFileSize(currentItem.size)}",
                             color = Color.White.copy(alpha = 0.75f),
                             fontSize = 11.sp
                         )
                     }
                     IconButton(onClick = {
-                        onDownloadToLocal()
-                        Toast.makeText(context, "开始保存到 Download/SMB", Toast.LENGTH_SHORT).show()
+                        onDownloadToLocal(currentItem)
+                        Toast.makeText(context, "已加入下载队列 (Download/SMB)", Toast.LENGTH_SHORT).show()
                     }) {
                         Icon(Icons.Default.CloudDownload, contentDescription = "下载保存", tint = Color.White)
                     }
-                    IconButton(onClick = { FileUtils.openFile(context, imageFile) }) {
+                    IconButton(onClick = { FileUtils.openFile(context, currentFile) }) {
                         Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = "系统查看", tint = Color.White)
+                    }
+                }
+
+                // 左右切换按钮（多张图片时展示）
+                if (imageItems.size > 1) {
+                    if (currentIndex > 0) {
+                        IconButton(
+                            onClick = { switchTo(currentIndex - 1) },
+                            modifier = Modifier
+                                .align(Alignment.CenterStart)
+                                .padding(start = 12.dp)
+                                .size(46.dp)
+                                .clip(CircleShape)
+                                .background(Color.Black.copy(alpha = 0.45f))
+                        ) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "上一张", tint = Color.White)
+                        }
+                    }
+                    if (currentIndex < imageItems.lastIndex) {
+                        IconButton(
+                            onClick = { switchTo(currentIndex + 1) },
+                            modifier = Modifier
+                                .align(Alignment.CenterEnd)
+                                .padding(end = 12.dp)
+                                .size(46.dp)
+                                .clip(CircleShape)
+                                .background(Color.Black.copy(alpha = 0.45f))
+                        ) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = "下一张", tint = Color.White)
+                        }
                     }
                 }
             }
@@ -544,4 +825,3 @@ fun SimpleInputDialog(
         }
     )
 }
-

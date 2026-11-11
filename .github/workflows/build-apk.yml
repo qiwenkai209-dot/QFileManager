@@ -59,7 +59,7 @@ jobs:
               - 🔍 全盘重复文件深度筛查（三阶段高精度流式比对）
               - 🎬 高级音视频播放器（支持进度条自由拖拽、无黑边全屏铺满与横竖屏旋转）
               - 📡 开源 LocalSend 协议局域网高速互传
-              - 🌐 SMB 局域网网络共享（SMB1/2/3、局域网探测、双向互传、Range 代理在线播片）
+              - 🌐 SMB 局域网网络共享（SMB1/2/3、局域网探测、双向断点续传、Range 代理在线播片与多图预览）
           files: app/build/outputs/apk/debug/*.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

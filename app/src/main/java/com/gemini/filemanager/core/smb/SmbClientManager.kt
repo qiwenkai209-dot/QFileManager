@@ -8,7 +8,6 @@ import com.gemini.filemanager.core.file.FileUtils
 import com.gemini.filemanager.data.model.FileCategory
 import com.gemini.filemanager.data.model.SmbConnectionConfig
 import com.gemini.filemanager.data.model.SmbRemoteFile
-import com.gemini.filemanager.data.model.SmbTransferDirection
 import com.gemini.filemanager.data.model.SmbTransferStatus
 import com.gemini.filemanager.data.model.SmbTransferTask
 import kotlinx.coroutines.Dispatchers
@@ -16,6 +15,7 @@ import kotlinx.coroutines.withContext
 import org.bouncycastle.jce.provider.BouncyCastleProvider
 import org.codelibs.jcifs.smb.CIFSContext
 import org.codelibs.jcifs.smb.SmbConstants
+import org.codelibs.jcifs.smb.SmbRandomAccess
 import org.codelibs.jcifs.smb.config.PropertyConfiguration
 import org.codelibs.jcifs.smb.context.BaseContext
 import org.codelibs.jcifs.smb.impl.NtlmPasswordAuthenticator
@@ -23,20 +23,19 @@ import org.codelibs.jcifs.smb.impl.SmbAuthException
 import org.codelibs.jcifs.smb.impl.SmbException
 import org.codelibs.jcifs.smb.impl.SmbFile
 import org.codelibs.jcifs.smb.impl.SmbFileInputStream
-import org.codelibs.jcifs.smb.impl.SmbFileOutputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.InputStream
-import java.io.OutputStream
+import java.io.RandomAccessFile
 import java.net.ConnectException
 import java.net.NoRouteToHostException
+import java.net.SocketException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 import java.security.Security
 import java.util.Locale
 import java.util.Properties
-import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
 sealed class LocalUploadSource {
@@ -44,9 +43,16 @@ sealed class LocalUploadSource {
     data class UriSource(val uri: Uri, val name: String, val size: Long) : LocalUploadSource()
 }
 
+data class SmbDownloadFileSpec(
+    val remoteFile: SmbRemoteFile,
+    val targetLocalDir: File
+)
+
 object SmbClientManager {
 
-    private const val BUFFER_SIZE = 64 * 1024
+    private const val TRANSFER_BUFFER_SIZE = 256 * 1024
+    private const val PREVIEW_BUFFER_SIZE = 128 * 1024
+    private const val PROGRESS_NOTIFY_INTERVAL_MS = 180L
 
     @Volatile
     private var securityInitialized = false
@@ -158,6 +164,18 @@ object SmbClientManager {
         return base.equals(current, ignoreCase = true)
     }
 
+    suspend fun testConnection(config: SmbConnectionConfig): Result<String> = withContext(Dispatchers.IO) {
+        invalidateContext(config.id)
+        val entryUrl = buildEntryUrl(config)
+        listDirectory(config, entryUrl).map { list ->
+            if (config.shareName.isNotBlank()) {
+                "连接成功（共享目录「${config.shareName}」内共 ${list.size} 项）"
+            } else {
+                "连接成功（发现 ${list.size} 个共享目录）"
+            }
+        }
+    }
+
     suspend fun listDirectory(
         config: SmbConnectionConfig,
         targetUrl: String
@@ -175,6 +193,9 @@ object SmbClientManager {
             }
             Result.success(list)
         } catch (e: Exception) {
+            if (isTransportFailure(e)) {
+                invalidateContext(config.id)
+            }
             Result.failure(Exception(formatSmbError(config, e), e))
         }
     }
@@ -374,6 +395,22 @@ object SmbClientManager {
         }
     }
 
+    fun deleteRemotePathSilent(config: SmbConnectionConfig, remoteUrl: String) {
+        if (remoteUrl.isBlank()) return
+        try {
+            val ctx = getContext(config)
+            val file = SmbFile(remoteUrl, ctx)
+            try {
+                if (file.exists()) {
+                    file.delete()
+                }
+            } finally {
+                try { file.close() } catch (_: Exception) {}
+            }
+        } catch (_: Exception) {
+        }
+    }
+
     private fun deleteRecursively(target: SmbFile) {
         if (target.isDirectory) {
             val children = target.listFiles() ?: emptyArray()
@@ -487,7 +524,7 @@ object SmbClientManager {
                 val total = if (remoteFile.size > 0L) remoteFile.size else smbFile.length()
                 SmbFileInputStream(smbFile).use { input ->
                     FileOutputStream(target).use { output ->
-                        val buf = ByteArray(BUFFER_SIZE)
+                        val buf = ByteArray(PREVIEW_BUFFER_SIZE)
                         var read: Int
                         var copied = 0L
                         while (input.read(buf).also { read = it } > 0) {
@@ -505,48 +542,47 @@ object SmbClientManager {
                 try { smbFile.close() } catch (_: Exception) {}
             }
         } catch (e: Exception) {
+            if (isTransportFailure(e)) invalidateContext(config.id)
             Result.failure(Exception(formatSmbError(config, e), e))
         }
     }
 
-    suspend fun downloadItems(
-        context: Context,
+    /**
+     * 展开包含文件夹的选择列表，为每个远端文件生成独立的可断点续传下载规格
+     */
+    suspend fun collectDownloadSpecs(
         config: SmbConnectionConfig,
         items: List<SmbRemoteFile>,
-        targetLocalDir: File,
-        onTaskUpdate: (SmbTransferTask) -> Unit
-    ): Int = withContext(Dispatchers.IO) {
-        if (!targetLocalDir.exists()) targetLocalDir.mkdirs()
-        val ctx = getContext(config)
-        var successCount = 0
-
-        for (item in items) {
-            if (item.isShareRoot) continue
-            val rootSmb = SmbFile(item.smbUrl, ctx)
-            try {
-                if (item.isDirectory) {
-                    val subDir = File(targetLocalDir, item.name)
-                    successCount += downloadDirectoryRecursively(context, rootSmb, subDir, onTaskUpdate)
+        baseLocalDir: File
+    ): Result<List<SmbDownloadFileSpec>> = withContext(Dispatchers.IO) {
+        try {
+            val ctx = getContext(config)
+            val specs = mutableListOf<SmbDownloadFileSpec>()
+            for (item in items) {
+                if (item.isShareRoot) continue
+                if (!item.isDirectory) {
+                    specs.add(SmbDownloadFileSpec(item, baseLocalDir))
                 } else {
-                    if (downloadSingleSmbFile(context, rootSmb, item.name, item.size, targetLocalDir, onTaskUpdate)) {
-                        successCount++
+                    val smbDir = SmbFile(item.smbUrl, ctx)
+                    try {
+                        collectDirSpecsRecursively(smbDir, File(baseLocalDir, item.name), specs)
+                    } finally {
+                        try { smbDir.close() } catch (_: Exception) {}
                     }
                 }
-            } finally {
-                try { rootSmb.close() } catch (_: Exception) {}
             }
+            Result.success(specs)
+        } catch (e: Exception) {
+            if (isTransportFailure(e)) invalidateContext(config.id)
+            Result.failure(Exception(formatSmbError(config, e), e))
         }
-        successCount
     }
 
-    private fun downloadDirectoryRecursively(
-        context: Context,
+    private fun collectDirSpecsRecursively(
         smbDir: SmbFile,
         localDir: File,
-        onTaskUpdate: (SmbTransferTask) -> Unit
-    ): Int {
-        if (!localDir.exists()) localDir.mkdirs()
-        var count = 0
+        out: MutableList<SmbDownloadFileSpec>
+    ) {
         val children = try {
             smbDir.listFiles() ?: emptyArray()
         } catch (_: Exception) {
@@ -557,209 +593,520 @@ object SmbClientManager {
                 val childName = child.name.trimEnd('/')
                 if (childName.isBlank() || childName == "." || childName == "..") continue
                 if (child.isDirectory) {
-                    count += downloadDirectoryRecursively(context, child, File(localDir, childName), onTaskUpdate)
+                    collectDirSpecsRecursively(child, File(localDir, childName), out)
                 } else {
-                    val len = try { child.length() } catch (_: Exception) { 0L }
-                    if (downloadSingleSmbFile(context, child, childName, len, localDir, onTaskUpdate)) {
-                        count++
-                    }
+                    val size = try { child.length() } catch (_: Exception) { 0L }
+                    val lastMod = try { child.lastModified() } catch (_: Exception) { 0L }
+                    val ext = childName.substringAfterLast('.', "").lowercase(Locale.ROOT)
+                    out.add(
+                        SmbDownloadFileSpec(
+                            remoteFile = SmbRemoteFile(
+                                name = childName,
+                                smbUrl = child.canonicalPath,
+                                shareName = try { child.share ?: "" } catch (_: Exception) { "" },
+                                isDirectory = false,
+                                isShareRoot = false,
+                                size = size,
+                                lastModified = lastMod,
+                                extension = ext,
+                                category = FileUtils.getCategory(ext)
+                            ),
+                            targetLocalDir = localDir
+                        )
+                    )
                 }
             } finally {
                 try { child.close() } catch (_: Exception) {}
             }
         }
-        return count
     }
 
-    private fun downloadSingleSmbFile(
+    /**
+     * 支持断点续传的 SMB 下载：基于 .smbpart 临时文件与 SmbRandomAccess.seek(offset)
+     */
+    fun executeResumableDownload(
         context: Context,
-        smbFile: SmbFile,
-        fileName: String,
-        knownSize: Long,
-        targetDir: File,
-        onTaskUpdate: (SmbTransferTask) -> Unit
-    ): Boolean {
-        val totalSize = if (knownSize > 0L) knownSize else try { smbFile.length() } catch (_: Exception) { 0L }
-        val localFile = uniqueLocalFile(targetDir, fileName)
-        val taskId = UUID.randomUUID().toString()
-        var currentTask = SmbTransferTask(
-            id = taskId,
-            fileName = fileName,
-            remoteUrl = smbFile.canonicalPath,
-            localPath = localFile.absolutePath,
-            size = totalSize,
-            direction = SmbTransferDirection.DOWNLOAD,
-            status = SmbTransferStatus.TRANSFERRING
+        config: SmbConnectionConfig,
+        task: SmbTransferTask,
+        isPaused: () -> Boolean,
+        isCancelled: () -> Boolean,
+        onUpdate: (SmbTransferTask, persistCheckpoint: Boolean) -> Unit
+    ): SmbTransferTask {
+        val targetDir = File(task.targetLocalDir.ifBlank { File(task.localPath).parent ?: context.filesDir.absolutePath })
+        if (!targetDir.exists()) targetDir.mkdirs()
+        val tempFile = File(
+            task.localTempPath.ifBlank {
+                File(targetDir, "${task.fileName}.${task.id.take(8)}.smbpart").absolutePath
+            }
         )
-        onTaskUpdate(currentTask)
+
+        var workingTask = task.copy(
+            localTempPath = tempFile.absolutePath,
+            targetLocalDir = targetDir.absolutePath,
+            status = SmbTransferStatus.TRANSFERRING,
+            errorMessage = null
+        )
+        onUpdate(workingTask, true)
+
+        var smbFile: SmbFile? = null
+        var smbRaf: SmbRandomAccess? = null
+        var localRaf: RandomAccessFile? = null
 
         return try {
-            val totalRead = SmbFileInputStream(smbFile).use { input ->
-                FileOutputStream(localFile).use { output ->
-                    copyStreamWithProgress(input, output, totalSize) { copied, prog, speed ->
-                        currentTask = currentTask.copy(
-                            bytesTransferred = copied,
-                            progress = prog,
-                            speed = speed
-                        )
-                        onTaskUpdate(currentTask)
-                    }
+            val ctx = getContext(config)
+            smbFile = SmbFile(task.remoteUrl, ctx)
+            if (!smbFile.exists()) {
+                throw IllegalStateException("远程文件不存在或已被移除")
+            }
+
+            val remoteSize = smbFile.length()
+            val remoteLastMod = try { smbFile.lastModified() } catch (_: Exception) { 0L }
+            val actualSize = if (remoteSize >= 0L) remoteSize else task.size
+
+            // 校验远端文件是否发生变化；若匹配且存在有效 .smbpart，则从断点偏移继续
+            var resumeOffset = 0L
+            if (tempFile.exists()) {
+                val partLen = tempFile.length()
+                val sameLength = task.size <= 0L || task.size == actualSize
+                val sameModTime = task.remoteLastModified <= 0L || remoteLastMod <= 0L || task.remoteLastModified == remoteLastMod
+                if (partLen in 1L..actualSize && sameLength && sameModTime) {
+                    resumeOffset = partLen
+                } else {
+                    tempFile.delete()
                 }
             }
 
-            MediaScannerConnection.scanFile(context, arrayOf(localFile.absolutePath), null, null)
-            onTaskUpdate(
-                currentTask.copy(
-                    bytesTransferred = totalRead,
+            workingTask = workingTask.copy(
+                size = actualSize,
+                remoteLastModified = remoteLastMod,
+                bytesTransferred = resumeOffset,
+                progress = if (actualSize > 0L) (resumeOffset.toFloat() / actualSize).coerceIn(0f, 1f) else 0f
+            )
+            onUpdate(workingTask, true)
+
+            if (actualSize == 0L) {
+                val finalFile = uniqueLocalFile(targetDir, task.fileName)
+                finalFile.createNewFile()
+                if (tempFile.exists()) tempFile.delete()
+                MediaScannerConnection.scanFile(context, arrayOf(finalFile.absolutePath), null, null)
+                val done = workingTask.copy(
+                    localPath = finalFile.absolutePath,
+                    bytesTransferred = 0L,
                     progress = 1f,
                     speed = "",
                     status = SmbTransferStatus.COMPLETED
                 )
-            )
-            true
-        } catch (e: Exception) {
-            if (localFile.exists() && localFile.length() == 0L) {
-                localFile.delete()
-            }
-            onTaskUpdate(
-                currentTask.copy(
-                    status = SmbTransferStatus.FAILED,
-                    errorMessage = e.message ?: "下载失败"
-                )
-            )
-            false
-        }
-    }
-
-    suspend fun uploadSources(
-        context: Context,
-        config: SmbConnectionConfig,
-        sources: List<LocalUploadSource>,
-        targetSmbDirUrl: String,
-        onTaskUpdate: (SmbTransferTask) -> Unit
-    ): Int = withContext(Dispatchers.IO) {
-        val ctx = getContext(config)
-        val normalizedDir = if (targetSmbDirUrl.endsWith("/")) targetSmbDirUrl else "$targetSmbDirUrl/"
-        val dirFile = SmbFile(normalizedDir, ctx)
-        var successCount = 0
-
-        try {
-            for (source in sources) {
-                if (uploadSingleSource(context, config, source, dirFile, onTaskUpdate)) {
-                    successCount++
-                }
-            }
-        } finally {
-            try { dirFile.close() } catch (_: Exception) {}
-        }
-        successCount
-    }
-
-    private fun uploadSingleSource(
-        context: Context,
-        config: SmbConnectionConfig,
-        source: LocalUploadSource,
-        remoteDir: SmbFile,
-        onTaskUpdate: (SmbTransferTask) -> Unit
-    ): Boolean {
-        val fileName: String
-        val totalSize: Long
-        val localPath: String
-        when (source) {
-            is LocalUploadSource.FileSource -> {
-                if (!source.file.exists() || !source.file.isFile) return false
-                fileName = source.file.name
-                totalSize = source.file.length()
-                localPath = source.file.absolutePath
-            }
-            is LocalUploadSource.UriSource -> {
-                fileName = source.name
-                totalSize = source.size
-                localPath = source.uri.toString()
-            }
-        }
-
-        val targetName = uniqueRemoteFileName(remoteDir, fileName)
-        val destSmb = SmbFile(remoteDir, targetName)
-        val taskId = UUID.randomUUID().toString()
-        var currentTask = SmbTransferTask(
-            id = taskId,
-            fileName = targetName,
-            remoteUrl = destSmb.canonicalPath,
-            localPath = localPath,
-            size = totalSize,
-            direction = SmbTransferDirection.UPLOAD,
-            status = SmbTransferStatus.TRANSFERRING
-        )
-        onTaskUpdate(currentTask)
-
-        return try {
-            val inputStream: InputStream = when (source) {
-                is LocalUploadSource.FileSource -> FileInputStream(source.file)
-                is LocalUploadSource.UriSource -> context.contentResolver.openInputStream(source.uri)
-                    ?: throw IllegalStateException("无法读取所选文件流")
+                onUpdate(done, true)
+                return done
             }
 
-            val totalWritten = inputStream.use { input ->
-                SmbFileOutputStream(destSmb).use { output ->
-                    copyStreamWithProgress(input, output, totalSize) { copied, prog, speed ->
-                        currentTask = currentTask.copy(
-                            bytesTransferred = copied,
+            var totalCopied = resumeOffset
+            if (resumeOffset < actualSize) {
+                val activeSmbRaf = smbFile.openRandomAccess("r")
+                smbRaf = activeSmbRaf
+                activeSmbRaf.seek(resumeOffset)
+
+                val activeLocalRaf = RandomAccessFile(tempFile, "rw")
+                localRaf = activeLocalRaf
+                activeLocalRaf.seek(resumeOffset)
+                activeLocalRaf.setLength(resumeOffset)
+
+                val buffer = ByteArray(TRANSFER_BUFFER_SIZE)
+                val sessionStart = System.currentTimeMillis()
+                var lastNotify = sessionStart
+                var lastPersistBytes = resumeOffset
+
+                while (totalCopied < actualSize) {
+                    if (isCancelled()) {
+                        try { activeLocalRaf.close() } catch (_: Exception) {}
+                        try { activeSmbRaf.close() } catch (_: Exception) {}
+                        localRaf = null
+                        smbRaf = null
+                        tempFile.delete()
+                        val cancelled = workingTask.copy(
+                            bytesTransferred = 0L,
+                            progress = 0f,
+                            speed = "",
+                            status = SmbTransferStatus.CANCELLED
+                        )
+                        onUpdate(cancelled, true)
+                        return cancelled
+                    }
+
+                    if (isPaused()) {
+                        try { activeLocalRaf.fd.sync() } catch (_: Exception) {}
+                        val paused = workingTask.copy(
+                            bytesTransferred = totalCopied,
+                            progress = (totalCopied.toFloat() / actualSize).coerceIn(0f, 1f),
+                            speed = "",
+                            status = SmbTransferStatus.PAUSED
+                        )
+                        onUpdate(paused, true)
+                        return paused
+                    }
+
+                    val toRead = minOf(buffer.size.toLong(), actualSize - totalCopied).toInt()
+                    val n = activeSmbRaf.read(buffer, 0, toRead)
+                    if (n <= 0) break
+
+                    activeLocalRaf.write(buffer, 0, n)
+                    totalCopied += n
+
+                    val now = System.currentTimeMillis()
+                    if (now - lastNotify >= PROGRESS_NOTIFY_INTERVAL_MS) {
+                        val elapsedSec = ((now - sessionStart).coerceAtLeast(1L)) / 1000.0
+                        val sessionBytes = (totalCopied - resumeOffset).coerceAtLeast(0L)
+                        val speed = formatSpeed(sessionBytes / elapsedSec)
+                        val prog = (totalCopied.toFloat() / actualSize).coerceIn(0f, 1f)
+                        val shouldPersist = (totalCopied - lastPersistBytes) >= 1024 * 1024L
+                        if (shouldPersist) lastPersistBytes = totalCopied
+                        workingTask = workingTask.copy(
+                            bytesTransferred = totalCopied,
                             progress = prog,
                             speed = speed
                         )
-                        onTaskUpdate(currentTask)
+                        onUpdate(workingTask, shouldPersist)
+                        lastNotify = now
                     }
+                }
+
+                try { activeLocalRaf.fd.sync() } catch (_: Exception) {}
+                activeLocalRaf.close()
+                localRaf = null
+                activeSmbRaf.close()
+                smbRaf = null
+            }
+
+            if (totalCopied < actualSize) {
+                throw IllegalStateException("远程读取提前结束 ($totalCopied / $actualSize)")
+            }
+
+            val finalFile = finalizeDownloadedTempFile(tempFile, targetDir, task.fileName)
+            MediaScannerConnection.scanFile(context, arrayOf(finalFile.absolutePath), null, null)
+            val completed = workingTask.copy(
+                localPath = finalFile.absolutePath,
+                bytesTransferred = totalCopied,
+                progress = 1f,
+                speed = "",
+                status = SmbTransferStatus.COMPLETED,
+                errorMessage = null
+            )
+            onUpdate(completed, true)
+            completed
+        } catch (e: Exception) {
+            if (isTransportFailure(e)) invalidateContext(config.id)
+            val failed = workingTask.copy(
+                bytesTransferred = if (tempFile.exists()) tempFile.length() else workingTask.bytesTransferred,
+                progress = if (workingTask.size > 0L && tempFile.exists()) {
+                    (tempFile.length().toFloat() / workingTask.size).coerceIn(0f, 1f)
+                } else {
+                    workingTask.progress
+                },
+                speed = "",
+                status = SmbTransferStatus.FAILED,
+                errorMessage = formatSmbError(config, e)
+            )
+            onUpdate(failed, true)
+            failed
+        } finally {
+            try { localRaf?.close() } catch (_: Exception) {}
+            try { smbRaf?.close() } catch (_: Exception) {}
+            try { smbFile?.close() } catch (_: Exception) {}
+        }
+    }
+
+    /**
+     * 支持断点续传的 SMB 上传：远端写入 .smbpart 临时文件，完成后原子 renameTo 正式文件名
+     */
+    fun executeResumableUpload(
+        context: Context,
+        config: SmbConnectionConfig,
+        task: SmbTransferTask,
+        isPaused: () -> Boolean,
+        isCancelled: () -> Boolean,
+        onUpdate: (SmbTransferTask, persistCheckpoint: Boolean) -> Unit
+    ): SmbTransferTask {
+        val normalizedDir = if (task.remoteDirUrl.endsWith("/")) task.remoteDirUrl else "${task.remoteDirUrl}/"
+        val remoteTempUrl = task.remoteTempUrl.ifBlank {
+            "${normalizedDir}${task.fileName}.${task.id.take(8)}.smbpart"
+        }
+
+        var workingTask = task.copy(
+            remoteDirUrl = normalizedDir,
+            remoteTempUrl = remoteTempUrl,
+            status = SmbTransferStatus.TRANSFERRING,
+            errorMessage = null
+        )
+        onUpdate(workingTask, true)
+
+        var remoteDir: SmbFile? = null
+        var remoteTemp: SmbFile? = null
+        var smbRaf: SmbRandomAccess? = null
+        var localRandomFile: RandomAccessFile? = null
+        var uriStream: InputStream? = null
+
+        return try {
+            val ctx = getContext(config)
+            remoteDir = SmbFile(normalizedDir, ctx)
+            remoteTemp = SmbFile(remoteTempUrl, ctx)
+
+            val totalSize = resolveLocalSourceSize(context, task.localPath, task.size)
+            workingTask = workingTask.copy(size = totalSize)
+
+            if (totalSize == 0L) {
+                val finalName = uniqueRemoteFileName(remoteDir, task.fileName)
+                val finalRemote = SmbFile(remoteDir, finalName)
+                try {
+                    if (!finalRemote.exists()) finalRemote.createNewFile()
+                    val done = workingTask.copy(
+                        fileName = finalName,
+                        remoteUrl = finalRemote.canonicalPath,
+                        bytesTransferred = 0L,
+                        progress = 1f,
+                        speed = "",
+                        status = SmbTransferStatus.COMPLETED
+                    )
+                    onUpdate(done, true)
+                    return done
+                } finally {
+                    try { finalRemote.close() } catch (_: Exception) {}
                 }
             }
 
-            onTaskUpdate(
-                currentTask.copy(
+            // 以 SMB 服务端实际已落盘的 .smbpart 长度为权威断点位置
+            val existingRemoteLen = try {
+                if (remoteTemp.exists()) remoteTemp.length() else 0L
+            } catch (_: Exception) {
+                0L
+            }
+
+            val resumeOffset = when {
+                existingRemoteLen in 1L..totalSize -> existingRemoteLen
+                existingRemoteLen > totalSize -> {
+                    try { remoteTemp.delete() } catch (_: Exception) {}
+                    0L
+                }
+                else -> 0L
+            }
+
+            workingTask = workingTask.copy(
+                bytesTransferred = resumeOffset,
+                progress = (resumeOffset.toFloat() / totalSize).coerceIn(0f, 1f)
+            )
+            onUpdate(workingTask, true)
+
+            var totalWritten = resumeOffset
+            if (resumeOffset < totalSize) {
+                // 打开本地源文件并精确跳转到 resumeOffset
+                val localPath = task.localPath
+                val isContentUri = localPath.startsWith("content://")
+                if (!isContentUri) {
+                    val f = File(localPath.removePrefix("file://"))
+                    if (!f.exists() || !f.isFile) {
+                        throw IllegalStateException("本地源文件已不存在")
+                    }
+                    localRandomFile = RandomAccessFile(f, "r")
+                    localRandomFile.seek(resumeOffset)
+                } else {
+                    val uri = Uri.parse(localPath)
+                    val pfd = try {
+                        context.contentResolver.openFileDescriptor(uri, "r")
+                    } catch (_: Exception) {
+                        null
+                    }
+                    if (pfd != null) {
+                        val fis = FileInputStream(pfd.fileDescriptor)
+                        try {
+                            fis.channel.position(resumeOffset)
+                            uriStream = object : InputStream() {
+                                override fun read(): Int = fis.read()
+                                override fun read(b: ByteArray, off: Int, len: Int): Int = fis.read(b, off, len)
+                                override fun close() {
+                                    try { fis.close() } catch (_: Exception) {}
+                                    try { pfd.close() } catch (_: Exception) {}
+                                }
+                            }
+                        } catch (e: Exception) {
+                            try { fis.close() } catch (_: Exception) {}
+                            try { pfd.close() } catch (_: Exception) {}
+                            throw e
+                        }
+                    } else {
+                        val stream = context.contentResolver.openInputStream(uri)
+                            ?: throw IllegalStateException("无法打开本地文件流（可能已失去权限，请重新选文件上传）")
+                        skipExactly(stream, resumeOffset)
+                        uriStream = stream
+                    }
+                }
+
+                val activeSmbRaf = remoteTemp.openRandomAccess("rw")
+                smbRaf = activeSmbRaf
+                activeSmbRaf.seek(resumeOffset)
+
+                val activeLocalFile = localRandomFile
+                val activeUriStream = uriStream
+                val buffer = ByteArray(TRANSFER_BUFFER_SIZE)
+                val sessionStart = System.currentTimeMillis()
+                var lastNotify = sessionStart
+                var lastPersistBytes = resumeOffset
+
+                while (totalWritten < totalSize) {
+                    if (isCancelled()) {
+                        try { activeSmbRaf.close() } catch (_: Exception) {}
+                        smbRaf = null
+                        try { remoteTemp.delete() } catch (_: Exception) {}
+                        val cancelled = workingTask.copy(
+                            bytesTransferred = 0L,
+                            progress = 0f,
+                            speed = "",
+                            status = SmbTransferStatus.CANCELLED
+                        )
+                        onUpdate(cancelled, true)
+                        return cancelled
+                    }
+
+                    if (isPaused()) {
+                        val paused = workingTask.copy(
+                            bytesTransferred = totalWritten,
+                            progress = (totalWritten.toFloat() / totalSize).coerceIn(0f, 1f),
+                            speed = "",
+                            status = SmbTransferStatus.PAUSED
+                        )
+                        onUpdate(paused, true)
+                        return paused
+                    }
+
+                    val n = if (activeLocalFile != null) {
+                        activeLocalFile.read(buffer)
+                    } else {
+                        activeUriStream!!.read(buffer)
+                    }
+                    if (n <= 0) break
+
+                    activeSmbRaf.write(buffer, 0, n)
+                    totalWritten += n
+
+                    val now = System.currentTimeMillis()
+                    if (now - lastNotify >= PROGRESS_NOTIFY_INTERVAL_MS) {
+                        val elapsedSec = ((now - sessionStart).coerceAtLeast(1L)) / 1000.0
+                        val sessionBytes = (totalWritten - resumeOffset).coerceAtLeast(0L)
+                        val speed = formatSpeed(sessionBytes / elapsedSec)
+                        val prog = (totalWritten.toFloat() / totalSize).coerceIn(0f, 1f)
+                        val shouldPersist = (totalWritten - lastPersistBytes) >= 1024 * 1024L
+                        if (shouldPersist) lastPersistBytes = totalWritten
+                        workingTask = workingTask.copy(
+                            bytesTransferred = totalWritten,
+                            progress = prog,
+                            speed = speed
+                        )
+                        onUpdate(workingTask, shouldPersist)
+                        lastNotify = now
+                    }
+                }
+
+                activeSmbRaf.close()
+                smbRaf = null
+                localRandomFile?.close()
+                localRandomFile = null
+                uriStream?.close()
+                uriStream = null
+            }
+
+            if (totalWritten < totalSize) {
+                throw IllegalStateException("本地文件读取提前结束 ($totalWritten / $totalSize)")
+            }
+
+            val finalName = uniqueRemoteFileName(remoteDir, task.fileName)
+            val finalRemote = SmbFile(remoteDir, finalName)
+            try {
+                remoteTemp.renameTo(finalRemote)
+                val completed = workingTask.copy(
+                    fileName = finalName,
+                    remoteUrl = finalRemote.canonicalPath,
                     bytesTransferred = totalWritten,
                     progress = 1f,
                     speed = "",
-                    status = SmbTransferStatus.COMPLETED
+                    status = SmbTransferStatus.COMPLETED,
+                    errorMessage = null
                 )
-            )
-            true
+                onUpdate(completed, true)
+                completed
+            } finally {
+                try { finalRemote.close() } catch (_: Exception) {}
+            }
         } catch (e: Exception) {
-            onTaskUpdate(
-                currentTask.copy(
-                    status = SmbTransferStatus.FAILED,
-                    errorMessage = formatSmbError(config, e)
-                )
+            if (isTransportFailure(e)) invalidateContext(config.id)
+            val serverSavedLen = try {
+                if (remoteTemp != null && remoteTemp.exists()) remoteTemp.length() else workingTask.bytesTransferred
+            } catch (_: Exception) {
+                workingTask.bytesTransferred
+            }
+            val failed = workingTask.copy(
+                bytesTransferred = serverSavedLen,
+                progress = if (workingTask.size > 0L) (serverSavedLen.toFloat() / workingTask.size).coerceIn(0f, 1f) else 0f,
+                speed = "",
+                status = SmbTransferStatus.FAILED,
+                errorMessage = formatSmbError(config, e)
             )
-            false
+            onUpdate(failed, true)
+            failed
         } finally {
-            try { destSmb.close() } catch (_: Exception) {}
+            try { localRandomFile?.close() } catch (_: Exception) {}
+            try { uriStream?.close() } catch (_: Exception) {}
+            try { smbRaf?.close() } catch (_: Exception) {}
+            try { remoteTemp?.close() } catch (_: Exception) {}
+            try { remoteDir?.close() } catch (_: Exception) {}
         }
     }
 
-    private inline fun copyStreamWithProgress(
-        input: InputStream,
-        output: OutputStream,
-        totalSize: Long,
-        onProgress: (copiedBytes: Long, progress: Float, speed: String) -> Unit
-    ): Long {
-        val startTime = System.currentTimeMillis()
-        var lastNotifyTime = startTime
-        var totalCopied = 0L
-        val buffer = ByteArray(BUFFER_SIZE)
-        var bytesRead: Int
-        while (input.read(buffer).also { bytesRead = it } > 0) {
-            output.write(buffer, 0, bytesRead)
-            totalCopied += bytesRead
-            val now = System.currentTimeMillis()
-            if (now - lastNotifyTime >= 150L) {
-                val elapsedSec = ((now - startTime).coerceAtLeast(1L)) / 1000.0
-                val speed = formatSpeed(totalCopied / elapsedSec)
-                val prog = if (totalSize > 0L) (totalCopied.toFloat() / totalSize).coerceIn(0f, 1f) else 0f
-                onProgress(totalCopied, prog, speed)
-                lastNotifyTime = now
+    private fun resolveLocalSourceSize(context: Context, localPath: String, fallbackSize: Long): Long {
+        if (!localPath.startsWith("content://")) {
+            val f = File(localPath.removePrefix("file://"))
+            if (f.exists()) return f.length()
+            return fallbackSize
+        }
+        val uri = Uri.parse(localPath)
+        try {
+            context.contentResolver.openFileDescriptor(uri, "r")?.use { pfd ->
+                if (pfd.statSize >= 0L) return pfd.statSize
+            }
+        } catch (_: Exception) {
+        }
+        return fallbackSize
+    }
+
+    private fun skipExactly(stream: InputStream, bytesToSkip: Long) {
+        var remaining = bytesToSkip
+        val skipBuf = ByteArray(64 * 1024)
+        while (remaining > 0L) {
+            val skipped = stream.skip(remaining)
+            if (skipped > 0L) {
+                remaining -= skipped
+            } else {
+                val read = stream.read(skipBuf, 0, minOf(skipBuf.size.toLong(), remaining).toInt())
+                if (read < 0) break
+                remaining -= read
             }
         }
-        output.flush()
-        return totalCopied
+    }
+
+    private fun finalizeDownloadedTempFile(tempFile: File, targetDir: File, desiredName: String): File {
+        val finalFile = uniqueLocalFile(targetDir, desiredName)
+        if (tempFile.renameTo(finalFile)) {
+            return finalFile
+        }
+        FileInputStream(tempFile).use { input ->
+            FileOutputStream(finalFile).use { output ->
+                val buf = ByteArray(TRANSFER_BUFFER_SIZE)
+                var n: Int
+                while (input.read(buf).also { n = it } > 0) {
+                    output.write(buf, 0, n)
+                }
+                output.flush()
+            }
+        }
+        tempFile.delete()
+        return finalFile
     }
 
     fun resolveUriMetadata(context: Context, uri: Uri): LocalUploadSource.UriSource? {
@@ -770,7 +1117,7 @@ object SmbClientManager {
             }
         }
         var displayName = "upload_${System.currentTimeMillis()}"
-        var size = 0L
+        var size = -1L
         try {
             context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
                 if (cursor.moveToFirst()) {
@@ -779,14 +1126,22 @@ object SmbClientManager {
                         cursor.getString(nameIdx)?.takeIf { it.isNotBlank() }?.let { displayName = it }
                     }
                     val sizeIdx = cursor.getColumnIndex(OpenableColumns.SIZE)
-                    if (sizeIdx >= 0) {
+                    if (sizeIdx >= 0 && !cursor.isNull(sizeIdx)) {
                         size = cursor.getLong(sizeIdx)
                     }
                 }
             }
         } catch (_: Exception) {
         }
-        return LocalUploadSource.UriSource(uri, displayName, size)
+        if (size < 0L) {
+            try {
+                context.contentResolver.openFileDescriptor(uri, "r")?.use { pfd ->
+                    if (pfd.statSize >= 0L) size = pfd.statSize
+                }
+            } catch (_: Exception) {
+            }
+        }
+        return LocalUploadSource.UriSource(uri, displayName, size.coerceAtLeast(0L))
     }
 
     private fun uniqueLocalFile(targetDir: File, fileName: String): File {
@@ -803,7 +1158,7 @@ object SmbClientManager {
         return candidate
     }
 
-    private fun uniqueRemoteFileName(remoteDir: SmbFile, fileName: String): String {
+    fun uniqueRemoteFileName(remoteDir: SmbFile, fileName: String): String {
         var candidateName = fileName
         var index = 1
         while (true) {
@@ -851,6 +1206,16 @@ object SmbClientManager {
             bytesPerSec >= 1024 -> String.format(Locale.US, "%.0f KB/s", bytesPerSec / 1024.0)
             else -> String.format(Locale.US, "%.0f B/s", bytesPerSec)
         }
+    }
+
+    private fun isTransportFailure(error: Throwable): Boolean {
+        return error is SocketTimeoutException ||
+            error is ConnectException ||
+            error is SocketException ||
+            error is NoRouteToHostException ||
+            error.cause is SocketTimeoutException ||
+            error.cause is ConnectException ||
+            error.cause is SocketException
     }
 
     fun formatSmbError(config: SmbConnectionConfig, error: Throwable): String {

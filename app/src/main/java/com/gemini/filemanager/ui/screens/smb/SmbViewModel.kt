@@ -9,12 +9,16 @@ import com.gemini.filemanager.core.smb.LocalUploadSource
 import com.gemini.filemanager.core.smb.SmbClientManager
 import com.gemini.filemanager.core.smb.SmbConnectionStore
 import com.gemini.filemanager.core.smb.SmbDiscovery
+import com.gemini.filemanager.core.smb.SmbTransferManager
+import com.gemini.filemanager.data.model.FileCategory
+import com.gemini.filemanager.data.model.SmbCategoryFilter
 import com.gemini.filemanager.data.model.SmbClipboard
 import com.gemini.filemanager.data.model.SmbClipboardAction
 import com.gemini.filemanager.data.model.SmbConnectionConfig
 import com.gemini.filemanager.data.model.SmbDiscoveredHost
 import com.gemini.filemanager.data.model.SmbRemoteFile
 import com.gemini.filemanager.data.model.SmbSortOption
+import com.gemini.filemanager.data.model.SmbTransferDirection
 import com.gemini.filemanager.data.model.SmbTransferStatus
 import com.gemini.filemanager.data.model.SmbTransferTask
 import kotlinx.coroutines.Dispatchers
@@ -46,12 +50,12 @@ data class SmbUiState(
     val filteredFiles: List<SmbRemoteFile> = emptyList(),
     val searchQuery: String = "",
     val sortOption: SmbSortOption = SmbSortOption.NAME_ASC,
+    val categoryFilter: SmbCategoryFilter = SmbCategoryFilter.ALL,
     val isLoading: Boolean = false,
     val errorMessage: String? = null,
     val isSelectionMode: Boolean = false,
     val selectedUrls: Set<String> = emptySet(),
     val clipboard: SmbClipboard? = null,
-    val transferTasks: List<SmbTransferTask> = emptyList(),
     val pendingUploadFiles: List<File> = emptyList(),
     val isPreparingPreview: Boolean = false,
     val previewProgress: Float = 0f
@@ -62,6 +66,10 @@ class SmbViewModel(application: Application) : AndroidViewModel(application) {
     private val store = SmbConnectionStore(application)
     private val _uiState = MutableStateFlow(SmbUiState())
     val uiState: StateFlow<SmbUiState> = _uiState.asStateFlow()
+
+    val transferTasks: StateFlow<List<SmbTransferTask>> = SmbTransferManager.tasks
+
+    private var completedUploadIdsSeen = emptySet<String>()
 
     private val discovery = SmbDiscovery(application, viewModelScope) { host ->
         _uiState.update { state ->
@@ -89,9 +97,32 @@ class SmbViewModel(application: Application) : AndroidViewModel(application) {
         )
 
     init {
+        SmbTransferManager.init(application)
+        completedUploadIdsSeen = SmbTransferManager.tasks.value
+            .filter { it.direction == SmbTransferDirection.UPLOAD && it.status == SmbTransferStatus.COMPLETED }
+            .map { it.id }
+            .toSet()
+
         refreshSavedConnections()
         _uiState.update { it.copy(localIp = discovery.getLocalIpAddress() ?: "未连接 Wi-Fi") }
         scanLanHosts()
+
+        viewModelScope.launch {
+            SmbTransferManager.tasks.collect { tasks ->
+                val newlyCompletedUploads = tasks.filter {
+                    it.direction == SmbTransferDirection.UPLOAD &&
+                        it.status == SmbTransferStatus.COMPLETED &&
+                        !completedUploadIdsSeen.contains(it.id)
+                }
+                if (newlyCompletedUploads.isNotEmpty()) {
+                    completedUploadIdsSeen = completedUploadIdsSeen + newlyCompletedUploads.map { it.id }
+                    val curUrl = _uiState.value.currentUrl
+                    if (curUrl.isNotBlank() && newlyCompletedUploads.any { it.remoteDirUrl == curUrl }) {
+                        refreshCurrentDirectory()
+                    }
+                }
+            }
+        }
     }
 
     fun refreshSavedConnections() {
@@ -126,10 +157,24 @@ class SmbViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun testConnection(config: SmbConnectionConfig, onResult: (Boolean, String) -> Unit) {
+        viewModelScope.launch {
+            val res = SmbClientManager.testConnection(config)
+            res.onSuccess { msg -> onResult(true, msg) }
+                .onFailure { err -> onResult(false, err.message ?: "连接失败") }
+        }
+    }
+
     fun saveConnection(config: SmbConnectionConfig, connectImmediately: Boolean = false) {
         SmbClientManager.invalidateContext(config.id)
         val updated = store.saveConnection(config)
-        _uiState.update { it.copy(savedConnections = updated) }
+        _uiState.update { state ->
+            val activeUpdated = if (state.activeConfig?.id == config.id) config else state.activeConfig
+            state.copy(
+                savedConnections = updated,
+                activeConfig = activeUpdated
+            )
+        }
         if (connectImmediately) {
             connect(config)
         }
@@ -163,6 +208,7 @@ class SmbViewModel(application: Application) : AndroidViewModel(application) {
                 currentUrl = entryUrl,
                 breadcrumbs = initialCrumbs,
                 searchQuery = "",
+                categoryFilter = SmbCategoryFilter.ALL,
                 isSelectionMode = false,
                 selectedUrls = emptySet(),
                 errorMessage = null
@@ -182,6 +228,7 @@ class SmbViewModel(application: Application) : AndroidViewModel(application) {
                 currentUrl = shareUrl,
                 breadcrumbs = listOf(baseCrumb, SmbBreadcrumb(cleanShare, shareUrl)),
                 searchQuery = "",
+                categoryFilter = SmbCategoryFilter.ALL,
                 isSelectionMode = false,
                 selectedUrls = emptySet(),
                 errorMessage = null
@@ -198,6 +245,7 @@ class SmbViewModel(application: Application) : AndroidViewModel(application) {
                 currentUrl = item.smbUrl,
                 breadcrumbs = newCrumbs,
                 searchQuery = "",
+                categoryFilter = SmbCategoryFilter.ALL,
                 isSelectionMode = false,
                 selectedUrls = emptySet(),
                 errorMessage = null
@@ -216,6 +264,7 @@ class SmbViewModel(application: Application) : AndroidViewModel(application) {
                 currentUrl = targetUrl,
                 breadcrumbs = targetCrumbs,
                 searchQuery = "",
+                categoryFilter = SmbCategoryFilter.ALL,
                 isSelectionMode = false,
                 selectedUrls = emptySet(),
                 errorMessage = null
@@ -249,6 +298,7 @@ class SmbViewModel(application: Application) : AndroidViewModel(application) {
                 files = emptyList(),
                 filteredFiles = emptyList(),
                 searchQuery = "",
+                categoryFilter = SmbCategoryFilter.ALL,
                 isSelectionMode = false,
                 selectedUrls = emptySet(),
                 errorMessage = null
@@ -280,7 +330,12 @@ class SmbViewModel(application: Application) : AndroidViewModel(application) {
                 _uiState.update {
                     it.copy(
                         files = list,
-                        filteredFiles = applyFilterAndSort(list, state.searchQuery, state.sortOption),
+                        filteredFiles = applyFilterAndSort(
+                            list,
+                            state.searchQuery,
+                            state.sortOption,
+                            state.categoryFilter
+                        ),
                         isLoading = false,
                         errorMessage = null
                     )
@@ -302,7 +357,7 @@ class SmbViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.update { state ->
             state.copy(
                 searchQuery = query,
-                filteredFiles = applyFilterAndSort(state.files, query, state.sortOption)
+                filteredFiles = applyFilterAndSort(state.files, query, state.sortOption, state.categoryFilter)
             )
         }
     }
@@ -311,7 +366,16 @@ class SmbViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.update { state ->
             state.copy(
                 sortOption = option,
-                filteredFiles = applyFilterAndSort(state.files, state.searchQuery, option)
+                filteredFiles = applyFilterAndSort(state.files, state.searchQuery, option, state.categoryFilter)
+            )
+        }
+    }
+
+    fun setCategoryFilter(filter: SmbCategoryFilter) {
+        _uiState.update { state ->
+            state.copy(
+                categoryFilter = filter,
+                filteredFiles = applyFilterAndSort(state.files, state.searchQuery, state.sortOption, filter)
             )
         }
     }
@@ -319,10 +383,16 @@ class SmbViewModel(application: Application) : AndroidViewModel(application) {
     private fun applyFilterAndSort(
         list: List<SmbRemoteFile>,
         query: String,
-        sort: SmbSortOption
+        sort: SmbSortOption,
+        categoryFilter: SmbCategoryFilter
     ): List<SmbRemoteFile> {
-        val filtered = if (query.isBlank()) list else {
-            list.filter { it.name.contains(query, ignoreCase = true) }
+        val byCategory = if (categoryFilter == SmbCategoryFilter.ALL) {
+            list
+        } else {
+            list.filter { !it.isDirectory && it.category == categoryFilter.targetCategory }
+        }
+        val filtered = if (query.isBlank()) byCategory else {
+            byCategory.filter { it.name.contains(query, ignoreCase = true) }
         }
         val comparator = when (sort) {
             SmbSortOption.NAME_ASC -> compareBy<SmbRemoteFile> { !it.isDirectory }
@@ -484,63 +554,55 @@ class SmbViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun downloadSelected(onComplete: (Int) -> Unit) {
+    fun downloadSelected(onQueued: (Int, String?) -> Unit) {
         val items = getSelectedItems()
         if (items.isEmpty()) return
         clearSelection()
-        downloadItems(items, onComplete)
+        downloadItems(items, onQueued)
     }
 
-    fun downloadItems(items: List<SmbRemoteFile>, onComplete: (Int) -> Unit) {
+    fun downloadItems(items: List<SmbRemoteFile>, onQueued: (Int, String?) -> Unit) {
         val config = _uiState.value.activeConfig ?: return
-        viewModelScope.launch {
-            val count = SmbClientManager.downloadItems(
-                context = getApplication(),
-                config = config,
-                items = items,
-                targetLocalDir = defaultDownloadDir,
-                onTaskUpdate = { task -> upsertTransferTask(task) }
-            )
-            onComplete(count)
-        }
+        SmbTransferManager.enqueueDownloads(
+            context = getApplication(),
+            config = config,
+            items = items,
+            targetLocalDir = defaultDownloadDir,
+            onQueued = onQueued
+        )
     }
 
-    fun uploadPendingFiles(onComplete: (Int) -> Unit) {
+    fun uploadPendingFiles(onQueued: (Int) -> Unit) {
         val pending = _uiState.value.pendingUploadFiles
         if (pending.isEmpty()) return
         uploadFiles(pending) { count ->
             clearPendingUploadFiles()
-            onComplete(count)
+            onQueued(count)
         }
     }
 
-    fun uploadFiles(files: List<File>, onComplete: (Int) -> Unit) {
+    fun uploadFiles(files: List<File>, onQueued: (Int) -> Unit) {
         val state = _uiState.value
         val config = state.activeConfig ?: return
         if (state.isAtServerRoot || files.isEmpty()) {
-            onComplete(0)
+            onQueued(0)
             return
         }
-        val targetUrl = state.currentUrl
         val sources = files.map { LocalUploadSource.FileSource(it) }
-        viewModelScope.launch {
-            val count = SmbClientManager.uploadSources(
-                context = getApplication(),
-                config = config,
-                sources = sources,
-                targetSmbDirUrl = targetUrl,
-                onTaskUpdate = { task -> upsertTransferTask(task) }
-            )
-            refreshCurrentDirectory()
-            onComplete(count)
-        }
+        SmbTransferManager.enqueueUploads(
+            context = getApplication(),
+            config = config,
+            sources = sources,
+            targetRemoteDirUrl = state.currentUrl,
+            onQueued = onQueued
+        )
     }
 
-    fun uploadUris(uris: List<Uri>, onComplete: (Int) -> Unit) {
+    fun uploadUris(uris: List<Uri>, onQueued: (Int) -> Unit) {
         val state = _uiState.value
         val config = state.activeConfig ?: return
         if (state.isAtServerRoot || uris.isEmpty()) {
-            onComplete(0)
+            onQueued(0)
             return
         }
         val targetUrl = state.currentUrl
@@ -548,20 +610,42 @@ class SmbViewModel(application: Application) : AndroidViewModel(application) {
             val sources = withContext(Dispatchers.IO) {
                 uris.mapNotNull { SmbClientManager.resolveUriMetadata(getApplication(), it) }
             }
-            if (sources.isEmpty()) {
-                onComplete(0)
-                return@launch
-            }
-            val count = SmbClientManager.uploadSources(
+            SmbTransferManager.enqueueUploads(
                 context = getApplication(),
                 config = config,
                 sources = sources,
-                targetSmbDirUrl = targetUrl,
-                onTaskUpdate = { task -> upsertTransferTask(task) }
+                targetRemoteDirUrl = targetUrl,
+                onQueued = onQueued
             )
-            refreshCurrentDirectory()
-            onComplete(count)
         }
+    }
+
+    fun pauseTransfer(taskId: String) {
+        SmbTransferManager.pauseTask(getApplication(), taskId)
+    }
+
+    fun resumeTransfer(taskId: String): Boolean {
+        return SmbTransferManager.resumeTask(getApplication(), taskId, _uiState.value.activeConfig)
+    }
+
+    fun cancelTransfer(taskId: String) {
+        SmbTransferManager.cancelTask(getApplication(), taskId, _uiState.value.activeConfig)
+    }
+
+    fun removeTransfer(taskId: String) {
+        SmbTransferManager.removeTask(getApplication(), taskId, _uiState.value.activeConfig)
+    }
+
+    fun pauseAllTransfers() {
+        SmbTransferManager.pauseAll(getApplication())
+    }
+
+    fun resumeAllTransfers() {
+        SmbTransferManager.resumeAll(getApplication(), _uiState.value.activeConfig)
+    }
+
+    fun clearFinishedTransfers() {
+        SmbTransferManager.clearFinished()
     }
 
     fun prepareStreamUrl(
@@ -606,26 +690,25 @@ class SmbViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun upsertTransferTask(task: SmbTransferTask) {
-        _uiState.update { state ->
-            val exists = state.transferTasks.any { it.id == task.id }
-            val next = if (exists) {
-                state.transferTasks.map { if (it.id == task.id) task else it }
-            } else {
-                state.transferTasks + task
-            }
-            state.copy(transferTasks = next)
+    fun loadPreviewImageSilent(
+        item: SmbRemoteFile,
+        onReady: (File) -> Unit,
+        onError: (String) -> Unit
+    ) {
+        val config = _uiState.value.activeConfig ?: return
+        viewModelScope.launch {
+            val result = SmbClientManager.downloadToCacheForPreview(
+                config = config,
+                remoteFile = item,
+                cacheRootDir = getApplication<Application>().cacheDir
+            )
+            result.onSuccess { file -> onReady(file) }
+                .onFailure { err -> onError(err.message ?: "图片加载失败") }
         }
     }
 
-    fun clearFinishedTransfers() {
-        _uiState.update { state ->
-            state.copy(
-                transferTasks = state.transferTasks.filter {
-                    it.status == SmbTransferStatus.TRANSFERRING || it.status == SmbTransferStatus.WAITING
-                }
-            )
-        }
+    fun getCurrentFolderImages(): List<SmbRemoteFile> {
+        return _uiState.value.filteredFiles.filter { !it.isDirectory && it.category == FileCategory.IMAGE }
     }
 
     override fun onCleared() {
@@ -633,4 +716,3 @@ class SmbViewModel(application: Application) : AndroidViewModel(application) {
         discovery.stop()
     }
 }
-

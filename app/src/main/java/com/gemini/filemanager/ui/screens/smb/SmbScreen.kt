@@ -37,6 +37,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.gemini.filemanager.core.file.FileUtils
 import com.gemini.filemanager.data.model.FileCategory
+import com.gemini.filemanager.data.model.SmbCategoryFilter
 import com.gemini.filemanager.data.model.SmbClipboardAction
 import com.gemini.filemanager.data.model.SmbConnectionConfig
 import com.gemini.filemanager.data.model.SmbDiscoveredHost
@@ -45,6 +46,12 @@ import com.gemini.filemanager.data.model.SmbSortOption
 import com.gemini.filemanager.data.model.SmbTransferStatus
 import com.gemini.filemanager.ui.components.VideoPlayerDialog
 import java.io.File
+
+private data class PreviewGalleryState(
+    val initialFile: File,
+    val images: List<SmbRemoteFile>,
+    val initialIndex: Int
+)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -55,6 +62,7 @@ fun SmbScreen(
 ) {
     val context = LocalContext.current
     val state by viewModel.uiState.collectAsState()
+    val transferTasks by viewModel.transferTasks.collectAsState()
 
     var editingConfig by remember { mutableStateOf<SmbConnectionConfig?>(null) }
     var showAddDialog by remember { mutableStateOf(false) }
@@ -71,7 +79,7 @@ fun SmbScreen(
 
     var streamingMediaUrl by remember { mutableStateOf<String?>(null) }
     var streamingMediaItem by remember { mutableStateOf<SmbRemoteFile?>(null) }
-    var previewImagePair by remember { mutableStateOf<Pair<File, SmbRemoteFile>?>(null) }
+    var previewGalleryState by remember { mutableStateOf<PreviewGalleryState?>(null) }
 
     LaunchedEffect(initialUploadFiles) {
         if (initialUploadFiles.isNotEmpty()) {
@@ -85,7 +93,7 @@ fun SmbScreen(
         if (uris.isNotEmpty()) {
             showTransferDialog = true
             viewModel.uploadUris(uris) { count ->
-                Toast.makeText(context, "已上传 $count 个文件到 SMB", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, "已加入 $count 个上传任务（支持断点续传）", Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -96,9 +104,8 @@ fun SmbScreen(
         }
     }
 
-    val activeTransferCount = state.transferTasks.count {
-        it.status == SmbTransferStatus.TRANSFERRING || it.status == SmbTransferStatus.WAITING
-    }
+    val activeTransferCount = transferTasks.count { it.isActive }
+    val resumableCount = transferTasks.count { it.canResume }
 
     Scaffold(
         topBar = {
@@ -134,7 +141,7 @@ fun SmbScreen(
                                     fontWeight = FontWeight.Bold
                                 )
                                 Text(
-                                    text = "支持 SMB1/2/3 · 电脑与 NAS 直连互传、在线播片",
+                                    text = "SMB1/2/3 · 断点续传 · 局域网探测 · 在线播片",
                                     fontSize = 11.sp,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -155,12 +162,13 @@ fun SmbScreen(
                     }
                 },
                 actions = {
-                    if (state.transferTasks.isNotEmpty()) {
+                    if (transferTasks.isNotEmpty()) {
                         IconButton(onClick = { showTransferDialog = true }) {
                             BadgedBox(
                                 badge = {
-                                    if (activeTransferCount > 0) {
-                                        Badge { Text(activeTransferCount.toString()) }
+                                    val badgeCount = if (activeTransferCount > 0) activeTransferCount else resumableCount
+                                    if (badgeCount > 0) {
+                                        Badge { Text(badgeCount.toString()) }
                                     }
                                 }
                             ) {
@@ -218,8 +226,9 @@ fun SmbScreen(
                             tint = MaterialTheme.colorScheme.primary
                         ) {
                             showTransferDialog = true
-                            viewModel.downloadSelected { count ->
-                                Toast.makeText(context, "成功下载 $count 个文件到 Download/SMB", Toast.LENGTH_SHORT).show()
+                            viewModel.downloadSelected { count, err ->
+                                val msg = err ?: "已加入 $count 个下载任务（支持断点续传）"
+                                Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
                             }
                         }
                         ActionBottomItem(
@@ -253,8 +262,8 @@ fun SmbScreen(
                 .fillMaxSize()
                 .padding(padding)
         ) {
-            // 正在传输中的迷你状态条
-            val runningTask = state.transferTasks.lastOrNull { it.status == SmbTransferStatus.TRANSFERRING }
+            // 正在传输或可断点续传的迷你快捷条
+            val runningTask = transferTasks.lastOrNull { it.status == SmbTransferStatus.TRANSFERRING }
             if (runningTask != null) {
                 Surface(
                     color = MaterialTheme.colorScheme.secondaryContainer,
@@ -265,25 +274,63 @@ fun SmbScreen(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 8.dp),
+                            .padding(horizontal = 16.dp, vertical = 6.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
                         Spacer(modifier = Modifier.width(10.dp))
                         Text(
-                            text = "${runningTask.fileName} (${(runningTask.progress * 100).toInt()}% ${runningTask.speed})",
+                            text = "${runningTask.fileName} · ${(runningTask.progress * 100).toInt()}% ${runningTask.speed}",
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Medium,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f)
                         )
-                        Text(
-                            text = "查看详情",
-                            fontSize = 12.sp,
-                            color = MaterialTheme.colorScheme.primary,
-                            fontWeight = FontWeight.SemiBold
+                        TextButton(
+                            onClick = { viewModel.pauseTransfer(runningTask.id) },
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+                        ) {
+                            Text("暂停", fontSize = 12.sp)
+                        }
+                    }
+                }
+            } else if (resumableCount > 0) {
+                Surface(
+                    color = Color(0xFFFFF3E0),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { showTransferDialog = true }
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            Icons.Default.PauseCircleOutline,
+                            contentDescription = null,
+                            tint = Color(0xFFEF6C00),
+                            modifier = Modifier.size(18.dp)
                         )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "有 $resumableCount 个断点续传任务未完成",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = Color(0xFF5D4037),
+                            modifier = Modifier.weight(1f)
+                        )
+                        TextButton(
+                            onClick = {
+                                showTransferDialog = true
+                                viewModel.resumeAllTransfers()
+                            },
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)
+                        ) {
+                            Text("全部续传", fontSize = 12.sp, color = Color(0xFFE65100), fontWeight = FontWeight.Bold)
+                        }
                     }
                 }
             }
@@ -314,7 +361,7 @@ fun SmbScreen(
                                 text = when {
                                     state.activeConfig == null -> "请连接 SMB 服务器并进入目标共享目录"
                                     state.isAtServerRoot -> "请先选择一个共享文件夹，再点击上传"
-                                    else -> "可一键上传到当前 SMB 目录"
+                                    else -> "可一键上传到当前 SMB 目录（支持断点续传）"
                                 },
                                 fontSize = 11.sp,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -329,7 +376,7 @@ fun SmbScreen(
                                     onClick = {
                                         showTransferDialog = true
                                         viewModel.uploadPendingFiles { count ->
-                                            Toast.makeText(context, "已上传 $count 个文件", Toast.LENGTH_SHORT).show()
+                                            Toast.makeText(context, "已加入 $count 个上传任务", Toast.LENGTH_SHORT).show()
                                         }
                                     },
                                     contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
@@ -359,11 +406,18 @@ fun SmbScreen(
                     },
                     onDeleteClick = { viewModel.deleteConnection(it.id) },
                     onDiscoveredHostClick = { host ->
-                        editingConfig = null
-                        prefillHost = host.ip
-                        prefillName = host.hostName
-                        prefillPort = host.port
-                        showAddDialog = true
+                        val existingSaved = state.savedConnections.find {
+                            it.host.equals(host.ip, ignoreCase = true)
+                        }
+                        if (existingSaved != null) {
+                            viewModel.connect(existingSaved)
+                        } else {
+                            editingConfig = null
+                            prefillHost = host.ip
+                            prefillName = host.hostName
+                            prefillPort = host.port
+                            showAddDialog = true
+                        }
                     }
                 )
             } else {
@@ -374,6 +428,7 @@ fun SmbScreen(
                     onBreadcrumbClick = { viewModel.navigateToBreadcrumb(it) },
                     onSearchChange = { viewModel.onSearchQueryChange(it) },
                     onSortSelect = { viewModel.setSortOption(it) },
+                    onCategoryFilterSelect = { viewModel.setCategoryFilter(it) },
                     onRetry = { viewModel.refreshCurrentDirectory() },
                     onSpecifyShare = { showCustomShareDialog = true },
                     onEditConnection = {
@@ -406,9 +461,17 @@ fun SmbScreen(
                                     )
                                 }
                                 FileCategory.IMAGE -> {
+                                    val images = viewModel.getCurrentFolderImages()
+                                    val idx = images.indexOfFirst { it.smbUrl == item.smbUrl }.coerceAtLeast(0)
                                     viewModel.downloadForPreview(
                                         item = item,
-                                        onReady = { file -> previewImagePair = file to item },
+                                        onReady = { file ->
+                                            previewGalleryState = PreviewGalleryState(
+                                                initialFile = file,
+                                                images = if (images.isEmpty()) listOf(item) else images,
+                                                initialIndex = idx
+                                            )
+                                        },
                                         onError = { err -> Toast.makeText(context, err, Toast.LENGTH_LONG).show() }
                                     )
                                 }
@@ -429,8 +492,9 @@ fun SmbScreen(
                     },
                     onDownloadItem = { item ->
                         showTransferDialog = true
-                        viewModel.downloadItems(listOf(item)) { count ->
-                            Toast.makeText(context, "已下载 $count 个文件到 Download/SMB", Toast.LENGTH_SHORT).show()
+                        viewModel.downloadItems(listOf(item)) { count, err ->
+                            val msg = err ?: "已加入 $count 个下载任务（支持断点续传）"
+                            Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
                         }
                     },
                     onRenameItem = { renamingItem = it },
@@ -485,6 +549,7 @@ fun SmbScreen(
             prefillHost = prefillHost,
             prefillName = prefillName,
             prefillPort = prefillPort,
+            onTestConnection = { cfg, cb -> viewModel.testConnection(cfg, cb) },
             onDismiss = { showAddDialog = false },
             onSave = { config, connectNow ->
                 showAddDialog = false
@@ -493,11 +558,20 @@ fun SmbScreen(
         )
     }
 
-    // 传输队列弹窗
+    // 传输队列弹窗（支持断点续传、暂停、取消、清理）
     if (showTransferDialog) {
         SmbTransferListDialog(
-            tasks = state.transferTasks,
+            tasks = transferTasks,
             downloadDirPath = viewModel.defaultDownloadDir.absolutePath,
+            onPauseTask = { viewModel.pauseTransfer(it) },
+            onResumeTask = { id ->
+                if (!viewModel.resumeTransfer(id)) {
+                    Toast.makeText(context, "无法恢复任务：连接配置不存在", Toast.LENGTH_SHORT).show()
+                }
+            },
+            onCancelTask = { viewModel.removeTransfer(it) },
+            onPauseAll = { viewModel.pauseAllTransfers() },
+            onResumeAll = { viewModel.resumeAllTransfers() },
             onClearFinished = { viewModel.clearFinishedTransfers() },
             onDismiss = { showTransferDialog = false }
         )
@@ -604,20 +678,20 @@ fun SmbScreen(
         )
     }
 
-    // 远程图片在线预览
-    if (previewImagePair != null) {
-        val (localFile, remoteItem) = previewImagePair!!
+    // 远程图片多图连续预览
+    if (previewGalleryState != null) {
+        val gallery = previewGalleryState!!
         SmbImagePreviewDialog(
-            imageFile = localFile,
-            remoteItem = remoteItem,
-            onDownloadToLocal = {
-                viewModel.downloadItems(listOf(remoteItem)) { count ->
-                    if (count > 0) {
-                        Toast.makeText(context, "已保存到 Download/SMB", Toast.LENGTH_SHORT).show()
-                    }
-                }
+            initialFile = gallery.initialFile,
+            imageItems = gallery.images,
+            initialIndex = gallery.initialIndex,
+            onLoadImage = { imgItem, onLoaded, onErr ->
+                viewModel.loadPreviewImageSilent(imgItem, onLoaded, onErr)
             },
-            onDismiss = { previewImagePair = null }
+            onDownloadToLocal = { imgItem ->
+                viewModel.downloadItems(listOf(imgItem)) { _, _ -> }
+            },
+            onDismiss = { previewGalleryState = null }
         )
     }
 }
@@ -631,6 +705,10 @@ private fun SmbConnectionHubContent(
     onDeleteClick: (SmbConnectionConfig) -> Unit,
     onDiscoveredHostClick: (SmbDiscoveredHost) -> Unit
 ) {
+    val savedHostsSet = remember(state.savedConnections) {
+        state.savedConnections.map { it.host.lowercase() }.toSet()
+    }
+
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(16.dp),
@@ -782,7 +860,11 @@ private fun SmbConnectionHubContent(
             }
         } else {
             items(state.discoveredHosts, key = { it.ip }) { host ->
-                DiscoveredSmbHostCard(host = host, onClick = { onDiscoveredHostClick(host) })
+                DiscoveredSmbHostCard(
+                    host = host,
+                    isAlreadySaved = savedHostsSet.contains(host.ip.lowercase()),
+                    onClick = { onDiscoveredHostClick(host) }
+                )
             }
         }
     }
@@ -866,6 +948,7 @@ private fun SavedSmbConfigCard(
 @Composable
 private fun DiscoveredSmbHostCard(
     host: SmbDiscoveredHost,
+    isAlreadySaved: Boolean,
     onClick: () -> Unit
 ) {
     Card(
@@ -912,7 +995,7 @@ private fun DiscoveredSmbHostCard(
                 onClick = onClick,
                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
             ) {
-                Text("连接", fontSize = 12.sp)
+                Text(if (isAlreadySaved) "直连" else "添加", fontSize = 12.sp)
             }
         }
     }
@@ -926,6 +1009,7 @@ private fun SmbRemoteBrowserContent(
     onBreadcrumbClick: (Int) -> Unit,
     onSearchChange: (String) -> Unit,
     onSortSelect: (SmbSortOption) -> Unit,
+    onCategoryFilterSelect: (SmbCategoryFilter) -> Unit,
     onRetry: () -> Unit,
     onSpecifyShare: () -> Unit,
     onEditConnection: () -> Unit,
@@ -1027,9 +1111,34 @@ private fun SmbRemoteBrowserContent(
                 .padding(horizontal = 16.dp, vertical = 4.dp),
             placeholder = { Text("搜索当前目录文件...") },
             leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+            trailingIcon = {
+                if (state.searchQuery.isNotEmpty()) {
+                    IconButton(onClick = { onSearchChange("") }) {
+                        Icon(Icons.Default.Clear, contentDescription = "清除搜索", modifier = Modifier.size(18.dp))
+                    }
+                }
+            },
             singleLine = true,
             shape = RoundedCornerShape(12.dp)
         )
+
+        // 分类快捷筛选（仅在共享目录内部显示）
+        if (!state.isAtServerRoot && state.files.isNotEmpty()) {
+            LazyRow(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 2.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                items(SmbCategoryFilter.entries) { filter ->
+                    FilterChip(
+                        selected = state.categoryFilter == filter,
+                        onClick = { onCategoryFilterSelect(filter) },
+                        label = { Text(filter.displayName, fontSize = 12.sp) }
+                    )
+                }
+            }
+        }
 
         // 统计、排序与快捷共享名入口
         Row(
@@ -1159,7 +1268,7 @@ private fun SmbRemoteBrowserContent(
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Text(
-                            text = if (state.isAtServerRoot) "未发现可见的共享目录" else "当前文件夹为空",
+                            text = if (state.isAtServerRoot) "未发现可见的共享目录" else "当前筛选条件下无文件",
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                         if (state.isAtServerRoot) {
@@ -1379,4 +1488,3 @@ private fun ActionBottomItem(
         }
     }
 }
-

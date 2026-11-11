@@ -145,9 +145,9 @@ fun HomeScreen(
                 FeatureWideCard(
                     title = "SMB 局域网网络共享",
                     subtitle = if (state.savedSmbCount > 0) {
-                        "已保存 ${state.savedSmbCount} 台共享主机 · 支持 SMB1/2/3 与在线播片"
+                        "已保存 ${state.savedSmbCount} 台共享主机 · 断点续传与在线播片"
                     } else {
-                        "直连 Windows / macOS / NAS 共享目录，支持传输与在线看片"
+                        "直连 Windows / macOS / NAS 共享，支持断点续传与在线看片"
                     },
                     icon = Icons.Default.FolderShared,
                     accentColor = Color(0xFF3F51B5),

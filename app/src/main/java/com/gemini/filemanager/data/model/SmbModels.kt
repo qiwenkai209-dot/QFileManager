@@ -59,32 +59,59 @@ enum class SmbSortOption(val displayName: String) {
     SIZE_ASC("大小 ↑ (最小)")
 }
 
+enum class SmbCategoryFilter(val displayName: String, val targetCategory: FileCategory?) {
+    ALL("全部", null),
+    VIDEO("视频", FileCategory.VIDEO),
+    IMAGE("图片", FileCategory.IMAGE),
+    AUDIO("音乐", FileCategory.AUDIO),
+    DOCUMENT("文档", FileCategory.DOCUMENT),
+    ARCHIVE("压缩包", FileCategory.ARCHIVE),
+    APK("安装包", FileCategory.APK)
+}
+
+@Serializable
 enum class SmbTransferDirection {
     DOWNLOAD,
     UPLOAD
 }
 
+@Serializable
 enum class SmbTransferStatus {
     WAITING,
     TRANSFERRING,
+    PAUSED,
     COMPLETED,
     FAILED,
     CANCELLED
 }
 
+@Serializable
 data class SmbTransferTask(
     val id: String,
+    val configId: String = "",
     val fileName: String,
     val remoteUrl: String,
+    val remoteTempUrl: String = "",
+    val remoteDirUrl: String = "",
     val localPath: String,
+    val localTempPath: String = "",
+    val targetLocalDir: String = "",
     val size: Long,
+    val remoteLastModified: Long = 0L,
     val bytesTransferred: Long = 0L,
     val progress: Float = 0f,
     val speed: String = "",
     val direction: SmbTransferDirection,
     val status: SmbTransferStatus = SmbTransferStatus.WAITING,
-    val errorMessage: String? = null
-)
+    val errorMessage: String? = null,
+    val createdAt: Long = System.currentTimeMillis()
+) {
+    val isActive: Boolean
+        get() = status == SmbTransferStatus.TRANSFERRING || status == SmbTransferStatus.WAITING
+
+    val canResume: Boolean
+        get() = status == SmbTransferStatus.PAUSED || status == SmbTransferStatus.FAILED
+}
 
 enum class SmbClipboardAction {
     COPY,
@@ -96,4 +123,3 @@ data class SmbClipboard(
     val items: List<SmbRemoteFile>,
     val configId: String
 )
-

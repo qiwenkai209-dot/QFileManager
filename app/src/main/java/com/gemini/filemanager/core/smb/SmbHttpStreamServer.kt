@@ -134,13 +134,14 @@ class SmbHttpStreamServer private constructor(port: Int) : NanoHTTPD("127.0.0.1"
         private var remaining: Long
     ) : InputStream() {
 
-        private val buffer = ByteArray(64 * 1024)
+        private val buffer = ByteArray(128 * 1024)
         private var bufferPos = 0
         private var bufferLimit = 0
+        @Volatile
         private var closed = false
 
         override fun read(): Int {
-            if (remaining <= 0L) return -1
+            if (closed || remaining <= 0L) return -1
             if (bufferPos >= bufferLimit) {
                 if (!refillBuffer()) return -1
             }
@@ -149,6 +150,7 @@ class SmbHttpStreamServer private constructor(port: Int) : NanoHTTPD("127.0.0.1"
         }
 
         override fun read(b: ByteArray, off: Int, len: Int): Int {
+            if (closed) return -1
             if (len == 0) return 0
             if (remaining <= 0L) return -1
             if (bufferPos < bufferLimit) {

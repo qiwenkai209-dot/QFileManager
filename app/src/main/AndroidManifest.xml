@@ -90,6 +90,11 @@
             android:foregroundServiceType="dataSync"
             android:exported="false" />
 
+        <service
+            android:name=".core.smb.SmbBackgroundService"
+            android:foregroundServiceType="dataSync"
+            android:exported="false" />
+
         <!-- FileProvider 用于打开和安装 APK -->
         <provider
             android:name="androidx.core.content.FileProvider"
