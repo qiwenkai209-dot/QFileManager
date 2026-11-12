@@ -26,7 +26,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 object SmbTransferManager {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val concurrencySemaphore = Semaphore(2)
+    private val concurrencySemaphore = Semaphore(3)
 
     private val _tasks = MutableStateFlow<List<SmbTransferTask>>(emptyList())
     val tasks: StateFlow<List<SmbTransferTask>> = _tasks.asStateFlow()

@@ -101,6 +101,13 @@ dependencies {
     implementation("org.codelibs:jcifs:3.0.4")
     implementation("uk.uuid.slf4j:slf4j-android:2.0.17-0")
 
+    // Media3 (ExoPlayer) for high-performance SMB streaming & local playback
+    implementation("androidx.media3:media3-exoplayer:1.4.1")
+    implementation("androidx.media3:media3-common:1.4.1")
+    implementation("androidx.media3:media3-datasource:1.4.1")
+    implementation("androidx.media3:media3-extractor:1.4.1")
+    implementation("androidx.media3:media3-exoplayer-hls:1.4.1")
+
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.1.5")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.5.1")

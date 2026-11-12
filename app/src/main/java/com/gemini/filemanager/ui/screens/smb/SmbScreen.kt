@@ -44,12 +44,18 @@ import com.gemini.filemanager.data.model.SmbDiscoveredHost
 import com.gemini.filemanager.data.model.SmbRemoteFile
 import com.gemini.filemanager.data.model.SmbSortOption
 import com.gemini.filemanager.data.model.SmbTransferStatus
+import com.gemini.filemanager.ui.components.PlayableMediaItem
 import com.gemini.filemanager.ui.components.VideoPlayerDialog
 import java.io.File
 
 private data class PreviewGalleryState(
     val initialFile: File,
     val images: List<SmbRemoteFile>,
+    val initialIndex: Int
+)
+
+private data class SmbPlayerLaunchState(
+    val mediaQueue: List<PlayableMediaItem>,
     val initialIndex: Int
 )
 
@@ -77,8 +83,7 @@ fun SmbScreen(
     var showDeleteConfirmDialog by remember { mutableStateOf(false) }
     var showSortMenu by remember { mutableStateOf(false) }
 
-    var streamingMediaUrl by remember { mutableStateOf<String?>(null) }
-    var streamingMediaItem by remember { mutableStateOf<SmbRemoteFile?>(null) }
+    var streamingLaunchState by remember { mutableStateOf<SmbPlayerLaunchState?>(null) }
     var previewGalleryState by remember { mutableStateOf<PreviewGalleryState?>(null) }
 
     LaunchedEffect(initialUploadFiles) {
@@ -449,15 +454,19 @@ fun SmbScreen(
                         } else {
                             when (item.category) {
                                 FileCategory.VIDEO, FileCategory.AUDIO -> {
-                                    viewModel.prepareStreamUrl(
-                                        item = item,
-                                        onReady = { url ->
-                                            streamingMediaItem = item
-                                            streamingMediaUrl = url
-                                        },
-                                        onError = { err ->
-                                            Toast.makeText(context, err, Toast.LENGTH_LONG).show()
-                                        }
+                                    val queueFiles = viewModel.getPlayableMediaQueue(item)
+                                    val queueItems = queueFiles.map { remote ->
+                                        PlayableMediaItem(
+                                            id = remote.smbUrl,
+                                            title = remote.name,
+                                            fileSizeBytes = remote.size,
+                                            isAudio = remote.category == FileCategory.AUDIO
+                                        )
+                                    }
+                                    val startIdx = queueFiles.indexOfFirst { it.smbUrl == item.smbUrl }.coerceAtLeast(0)
+                                    streamingLaunchState = SmbPlayerLaunchState(
+                                        mediaQueue = queueItems,
+                                        initialIndex = startIdx
                                     )
                                 }
                                 FileCategory.IMAGE -> {
@@ -650,30 +659,36 @@ fun SmbScreen(
         )
     }
 
-    // 在线流媒体音视频播放器
-    if (streamingMediaUrl != null && streamingMediaItem != null) {
-        val item = streamingMediaItem!!
-        val url = streamingMediaUrl!!
-        val isAudio = item.category == FileCategory.AUDIO
+    // 在线流媒体音视频播放器（Media3 ExoPlayer 直连 SMB + 断点续播 + 外挂字幕 + 播放队列）
+    streamingLaunchState?.let { launchState ->
         VideoPlayerDialog(
-            videoUri = Uri.parse(url),
-            title = item.name,
-            fileSizeBytes = item.size,
-            isAudio = isAudio,
-            onExternalOpen = {
-                val intent = Intent(Intent.ACTION_VIEW).apply {
-                    setDataAndType(Uri.parse(url), if (isAudio) "audio/*" else "video/*")
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
-                try {
-                    context.startActivity(Intent.createChooser(intent, "选择外部播放器"))
-                } catch (_: Exception) {
-                    Toast.makeText(context, "未找到可用的外部播放器，可先下载到本机", Toast.LENGTH_SHORT).show()
+            mediaQueue = launchState.mediaQueue,
+            initialIndex = launchState.initialIndex,
+            onPrepareMedia = { mediaItem -> viewModel.preparePlayableMediaSource(mediaItem) },
+            onGetSavedPosition = { mediaId -> viewModel.getSavedPlaybackPosition(mediaId) },
+            onSaveProgress = { mediaId, posMs, durMs -> viewModel.savePlaybackProgress(mediaId, posMs, durMs) },
+            onClearProgress = { mediaId -> viewModel.clearPlaybackProgress(mediaId) },
+            onGetStreamSpeedBytesPerSec = { token -> viewModel.getStreamSpeedBytesPerSec(token) },
+            onExternalOpenItem = { prepared ->
+                val extUrl = prepared.mediaItem.externalUrl ?: prepared.mediaItem.directUri?.toString()
+                if (extUrl.isNullOrBlank()) {
+                    Toast.makeText(context, "外部播放地址尚未就绪", Toast.LENGTH_SHORT).show()
+                } else {
+                    val mime = if (prepared.mediaItem.isAudio) "audio/*" else "video/*"
+                    val intent = Intent(Intent.ACTION_VIEW).apply {
+                        setDataAndType(Uri.parse(extUrl), mime)
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    try {
+                        context.startActivity(Intent.createChooser(intent, "选择外部播放器"))
+                    } catch (_: Exception) {
+                        Toast.makeText(context, "未找到可用的外部播放器，可先下载到本机", Toast.LENGTH_SHORT).show()
+                    }
                 }
             },
+            onReleaseMediaToken = { token -> viewModel.releaseStreamToken(token) },
             onDismissRequest = {
-                streamingMediaUrl = null
-                streamingMediaItem = null
+                streamingLaunchState = null
             }
         )
     }

@@ -10,8 +10,18 @@ import com.gemini.filemanager.data.model.SmbConnectionConfig
 import com.gemini.filemanager.data.model.SmbRemoteFile
 import com.gemini.filemanager.data.model.SmbTransferStatus
 import com.gemini.filemanager.data.model.SmbTransferTask
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.bouncycastle.jce.provider.BouncyCastleProvider
 import org.codelibs.jcifs.smb.CIFSContext
 import org.codelibs.jcifs.smb.SmbConstants
@@ -23,6 +33,7 @@ import org.codelibs.jcifs.smb.impl.SmbAuthException
 import org.codelibs.jcifs.smb.impl.SmbException
 import org.codelibs.jcifs.smb.impl.SmbFile
 import org.codelibs.jcifs.smb.impl.SmbFileInputStream
+import java.io.BufferedOutputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -37,6 +48,9 @@ import java.security.Security
 import java.util.Locale
 import java.util.Properties
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 
 sealed class LocalUploadSource {
     data class FileSource(val file: File) : LocalUploadSource()
@@ -50,8 +64,10 @@ data class SmbDownloadFileSpec(
 
 object SmbClientManager {
 
-    private const val TRANSFER_BUFFER_SIZE = 256 * 1024
-    private const val PREVIEW_BUFFER_SIZE = 128 * 1024
+    private const val TRANSFER_BUFFER_SIZE = 1024 * 1024
+    private const val PREVIEW_BUFFER_SIZE = 512 * 1024
+    private const val DOWNLOAD_PARALLEL_WORKERS = 3
+    private const val DOWNLOAD_WINDOW_CHUNKS = 6
     private const val PROGRESS_NOTIFY_INTERVAL_MS = 180L
 
     @Volatile
@@ -62,6 +78,7 @@ object SmbClientManager {
         val context: CIFSContext
     )
 
+    private val contextLock = Any()
     private val contextCache = ConcurrentHashMap<String, CachedContext>()
 
     private fun ensureSecurityProvider() {
@@ -82,7 +99,9 @@ object SmbClientManager {
     }
 
     fun invalidateContext(configId: String) {
-        val removed = contextCache.remove(configId)
+        val removed = synchronized(contextLock) {
+            contextCache.remove(configId)
+        }
         if (removed != null) {
             try {
                 removed.context.close()
@@ -97,10 +116,19 @@ object SmbClientManager {
             setProperty("jcifs.client.minVersion", config.protocolMode.minVersion)
             setProperty("jcifs.client.maxVersion", config.protocolMode.maxVersion)
             setProperty("jcifs.client.connTimeout", "8000")
-            setProperty("jcifs.client.soTimeout", "20000")
-            setProperty("jcifs.client.responseTimeout", "20000")
+            setProperty("jcifs.client.soTimeout", "25000")
+            setProperty("jcifs.client.responseTimeout", "25000")
             setProperty("jcifs.client.dfs.disabled", "true")
             setProperty("jcifs.resolveOrder", "DNS,BCAST")
+            // 传输层与大包吞吐调优（1MB 大包 + 禁用 Nagle + 提高并发请求窗口）
+            setProperty("jcifs.client.tcpNoDelay", "true")
+            setProperty("jcifs.client.rcv_buf_size", "1048576")
+            setProperty("jcifs.client.snd_buf_size", "1048576")
+            setProperty("jcifs.client.maxTransferSize", "1048576")
+            setProperty("jcifs.client.maxMpxCount", "64")
+            setProperty("jcifs.maxBuffers", "32")
+            setProperty("jcifs.client.useLargeReadWrite", "true")
+            setProperty("jcifs.client.useBatching", "true")
             if (config.isGuest) {
                 setProperty("jcifs.client.allowGuestFallback", "true")
             }
@@ -110,32 +138,34 @@ object SmbClientManager {
 
     fun getContext(config: SmbConnectionConfig, forceAnonymous: Boolean = false): CIFSContext {
         val sig = configSignature(config) + "|anon=$forceAnonymous"
-        val cached = contextCache[config.id]
-        if (cached != null && cached.signature == sig) {
-            return cached.context
-        }
-        if (cached != null) {
-            try {
-                cached.context.close()
-            } catch (_: Exception) {
+        synchronized(contextLock) {
+            val cached = contextCache[config.id]
+            if (cached != null && cached.signature == sig) {
+                return cached.context
             }
-        }
+            if (cached != null) {
+                try {
+                    cached.context.close()
+                } catch (_: Exception) {
+                }
+            }
 
-        val baseContext = createBaseContext(config)
-        val ctx = when {
-            forceAnonymous -> baseContext.withAnonymousCredentials()
-            config.isGuest -> baseContext.withGuestCredentials()
-            config.username.isBlank() && config.password.isBlank() -> baseContext.withAnonymousCredentials()
-            else -> baseContext.withCredentials(
-                NtlmPasswordAuthenticator(
-                    config.domain.trim().ifBlank { null },
-                    config.username.trim(),
-                    config.password
+            val baseContext = createBaseContext(config)
+            val ctx = when {
+                forceAnonymous -> baseContext.withAnonymousCredentials()
+                config.isGuest -> baseContext.withGuestCredentials()
+                config.username.isBlank() && config.password.isBlank() -> baseContext.withAnonymousCredentials()
+                else -> baseContext.withCredentials(
+                    NtlmPasswordAuthenticator(
+                        config.domain.trim().ifBlank { null },
+                        config.username.trim(),
+                        config.password
+                    )
                 )
-            )
+            }
+            contextCache[config.id] = CachedContext(sig, ctx)
+            return ctx
         }
-        contextCache[config.id] = CachedContext(sig, ctx)
-        return ctx
     }
 
     fun buildServerBaseUrl(config: SmbConnectionConfig): String {
@@ -490,19 +520,61 @@ object SmbClientManager {
         }
     }
 
-    fun getStreamUrl(config: SmbConnectionConfig, remoteFile: SmbRemoteFile): String {
-        val ctx = getContext(config)
+    fun prepareStreamTarget(config: SmbConnectionConfig, remoteFile: SmbRemoteFile): SmbPreparedStream {
         val mime = resolveMimeType(remoteFile.name)
         val server = SmbHttpStreamServer.getInstance()
-        return server.registerTarget(
+        val token = SmbStreamRegistry.register(
             SmbStreamTarget(
                 smbUrl = remoteFile.smbUrl,
-                context = ctx,
+                contextProvider = { getContext(config) },
+                onTransportFailure = { invalidateContext(config.id) },
                 fileName = remoteFile.name,
                 fileSize = remoteFile.size,
                 mimeType = mime
             )
         )
+        return SmbPreparedStream(
+            token = token,
+            directUri = SmbStreamRegistry.buildDirectUri(token, remoteFile.name),
+            httpUrl = server.buildHttpUrl(token, remoteFile.name),
+            mimeType = mime
+        )
+    }
+
+    fun getStreamUrl(config: SmbConnectionConfig, remoteFile: SmbRemoteFile): String {
+        return prepareStreamTarget(config, remoteFile).httpUrl
+    }
+
+    /**
+     * 从同一远程目录中智能匹配当前视频的外挂字幕文件（支持 .srt / .ass / .ssa / .vtt）。
+     */
+    fun findMatchingSubtitles(
+        videoFile: SmbRemoteFile,
+        folderFiles: List<SmbRemoteFile>
+    ): List<SmbRemoteFile> {
+        val videoBase = videoFile.name.substringBeforeLast('.', videoFile.name).lowercase(Locale.ROOT)
+        if (videoBase.isBlank()) return emptyList()
+        val subtitleExts = setOf("srt", "ass", "ssa", "vtt")
+        return folderFiles
+            .asSequence()
+            .filter {
+                val ext = it.extension.ifBlank { it.name.substringAfterLast('.', "") }.lowercase(Locale.ROOT)
+                !it.isDirectory && subtitleExts.contains(ext)
+            }
+            .mapNotNull { sub ->
+                val subBase = sub.name.substringBeforeLast('.', sub.name).lowercase(Locale.ROOT)
+                val score = when {
+                    subBase == videoBase -> 3
+                    subBase.startsWith("$videoBase.") || subBase.startsWith("${videoBase}_") ||
+                        subBase.startsWith("${videoBase}-") -> 2
+                    subBase.startsWith(videoBase) -> 1
+                    else -> 0
+                }
+                if (score > 0) sub to score else null
+            }
+            .sortedByDescending { it.second }
+            .map { it.first }
+            .toList()
     }
 
     suspend fun downloadToCacheForPreview(
@@ -523,7 +595,7 @@ object SmbClientManager {
             try {
                 val total = if (remoteFile.size > 0L) remoteFile.size else smbFile.length()
                 SmbFileInputStream(smbFile).use { input ->
-                    FileOutputStream(target).use { output ->
+                    BufferedOutputStream(FileOutputStream(target), PREVIEW_BUFFER_SIZE).use { output ->
                         val buf = ByteArray(PREVIEW_BUFFER_SIZE)
                         var read: Int
                         var copied = 0L
@@ -702,78 +774,88 @@ object SmbClientManager {
 
             var totalCopied = resumeOffset
             if (resumeOffset < actualSize) {
-                val activeSmbRaf = smbFile.openRandomAccess("r")
-                smbRaf = activeSmbRaf
-                activeSmbRaf.seek(resumeOffset)
-
                 val activeLocalRaf = RandomAccessFile(tempFile, "rw")
                 localRaf = activeLocalRaf
                 activeLocalRaf.seek(resumeOffset)
                 activeLocalRaf.setLength(resumeOffset)
 
-                val buffer = ByteArray(TRANSFER_BUFFER_SIZE)
-                val sessionStart = System.currentTimeMillis()
-                var lastNotify = sessionStart
-                var lastPersistBytes = resumeOffset
-
-                while (totalCopied < actualSize) {
-                    if (isCancelled()) {
-                        try { activeLocalRaf.close() } catch (_: Exception) {}
-                        try { activeSmbRaf.close() } catch (_: Exception) {}
-                        localRaf = null
-                        smbRaf = null
-                        tempFile.delete()
-                        val cancelled = workingTask.copy(
-                            bytesTransferred = 0L,
-                            progress = 0f,
-                            speed = "",
-                            status = SmbTransferStatus.CANCELLED
-                        )
-                        onUpdate(cancelled, true)
-                        return cancelled
-                    }
-
-                    if (isPaused()) {
-                        try { activeLocalRaf.fd.sync() } catch (_: Exception) {}
-                        val paused = workingTask.copy(
-                            bytesTransferred = totalCopied,
-                            progress = (totalCopied.toFloat() / actualSize).coerceIn(0f, 1f),
-                            speed = "",
-                            status = SmbTransferStatus.PAUSED
-                        )
-                        onUpdate(paused, true)
-                        return paused
-                    }
-
-                    val toRead = minOf(buffer.size.toLong(), actualSize - totalCopied).toInt()
-                    val n = activeSmbRaf.read(buffer, 0, toRead)
-                    if (n <= 0) break
-
-                    activeLocalRaf.write(buffer, 0, n)
-                    totalCopied += n
-
-                    val now = System.currentTimeMillis()
-                    if (now - lastNotify >= PROGRESS_NOTIFY_INTERVAL_MS) {
-                        val elapsedSec = ((now - sessionStart).coerceAtLeast(1L)) / 1000.0
-                        val sessionBytes = (totalCopied - resumeOffset).coerceAtLeast(0L)
-                        val speed = formatSpeed(sessionBytes / elapsedSec)
-                        val prog = (totalCopied.toFloat() / actualSize).coerceIn(0f, 1f)
-                        val shouldPersist = (totalCopied - lastPersistBytes) >= 1024 * 1024L
-                        if (shouldPersist) lastPersistBytes = totalCopied
+                val reporter = TransferProgressReporter(
+                    totalSize = actualSize,
+                    initialBytes = resumeOffset,
+                    onEmit = { bytes, prog, speed, persist ->
                         workingTask = workingTask.copy(
-                            bytesTransferred = totalCopied,
+                            bytesTransferred = bytes,
                             progress = prog,
                             speed = speed
                         )
-                        onUpdate(workingTask, shouldPersist)
-                        lastNotify = now
+                        onUpdate(workingTask, persist)
                     }
+                )
+
+                val outcome = if (actualSize - resumeOffset >= 2L * TRANSFER_BUFFER_SIZE) {
+                    downloadParallelWithWindow(
+                        ctx = ctx,
+                        primaryFile = smbFile,
+                        remoteUrl = task.remoteUrl,
+                        startOffset = resumeOffset,
+                        actualSize = actualSize,
+                        localRaf = activeLocalRaf,
+                        isPaused = isPaused,
+                        isCancelled = isCancelled,
+                        onChunkWritten = { bytesWritten, chunkLen ->
+                            reporter.recordAndMaybeNotify(bytesWritten, chunkLen)
+                        }
+                    )
+                } else {
+                    val activeSmbRaf = smbFile.openRandomAccess("r")
+                    smbRaf = activeSmbRaf
+                    activeSmbRaf.seek(resumeOffset)
+                    downloadSingleStream(
+                        smbRaf = activeSmbRaf,
+                        startOffset = resumeOffset,
+                        actualSize = actualSize,
+                        localRaf = activeLocalRaf,
+                        isPaused = isPaused,
+                        isCancelled = isCancelled,
+                        onChunkWritten = { bytesWritten, chunkLen ->
+                            reporter.recordAndMaybeNotify(bytesWritten, chunkLen)
+                        }
+                    )
+                }
+
+                totalCopied = outcome.bytesTransferred
+                if (outcome.cancelled) {
+                    try { activeLocalRaf.close() } catch (_: Exception) {}
+                    try { smbRaf?.close() } catch (_: Exception) {}
+                    localRaf = null
+                    smbRaf = null
+                    tempFile.delete()
+                    val cancelled = workingTask.copy(
+                        bytesTransferred = 0L,
+                        progress = 0f,
+                        speed = "",
+                        status = SmbTransferStatus.CANCELLED
+                    )
+                    onUpdate(cancelled, true)
+                    return cancelled
+                }
+
+                if (outcome.paused) {
+                    try { activeLocalRaf.fd.sync() } catch (_: Exception) {}
+                    val paused = workingTask.copy(
+                        bytesTransferred = totalCopied,
+                        progress = (totalCopied.toFloat() / actualSize).coerceIn(0f, 1f),
+                        speed = "",
+                        status = SmbTransferStatus.PAUSED
+                    )
+                    onUpdate(paused, true)
+                    return paused
                 }
 
                 try { activeLocalRaf.fd.sync() } catch (_: Exception) {}
                 activeLocalRaf.close()
                 localRaf = null
-                activeSmbRaf.close()
+                smbRaf?.close()
                 smbRaf = null
             }
 
@@ -816,7 +898,7 @@ object SmbClientManager {
     }
 
     /**
-     * 支持断点续传的 SMB 上传：远端写入 .smbpart 临时文件，完成后原子 renameTo 正式文件名
+     * 支持断点续传的 SMB 上传：本地预读与远端写入双缓冲并行流水线 + .smbpart 原子提交
      */
     fun executeResumableUpload(
         context: Context,
@@ -945,63 +1027,61 @@ object SmbClientManager {
 
                 val activeLocalFile = localRandomFile
                 val activeUriStream = uriStream
-                val buffer = ByteArray(TRANSFER_BUFFER_SIZE)
-                val sessionStart = System.currentTimeMillis()
-                var lastNotify = sessionStart
-                var lastPersistBytes = resumeOffset
+                val readSource: (ByteArray, Int, Int) -> Int = if (activeLocalFile != null) {
+                    { buf, off, len -> activeLocalFile.read(buf, off, len) }
+                } else {
+                    { buf, off, len -> activeUriStream!!.read(buf, off, len) }
+                }
 
-                while (totalWritten < totalSize) {
-                    if (isCancelled()) {
-                        try { activeSmbRaf.close() } catch (_: Exception) {}
-                        smbRaf = null
-                        try { remoteTemp.delete() } catch (_: Exception) {}
-                        val cancelled = workingTask.copy(
-                            bytesTransferred = 0L,
-                            progress = 0f,
-                            speed = "",
-                            status = SmbTransferStatus.CANCELLED
-                        )
-                        onUpdate(cancelled, true)
-                        return cancelled
-                    }
-
-                    if (isPaused()) {
-                        val paused = workingTask.copy(
-                            bytesTransferred = totalWritten,
-                            progress = (totalWritten.toFloat() / totalSize).coerceIn(0f, 1f),
-                            speed = "",
-                            status = SmbTransferStatus.PAUSED
-                        )
-                        onUpdate(paused, true)
-                        return paused
-                    }
-
-                    val n = if (activeLocalFile != null) {
-                        activeLocalFile.read(buffer)
-                    } else {
-                        activeUriStream!!.read(buffer)
-                    }
-                    if (n <= 0) break
-
-                    activeSmbRaf.write(buffer, 0, n)
-                    totalWritten += n
-
-                    val now = System.currentTimeMillis()
-                    if (now - lastNotify >= PROGRESS_NOTIFY_INTERVAL_MS) {
-                        val elapsedSec = ((now - sessionStart).coerceAtLeast(1L)) / 1000.0
-                        val sessionBytes = (totalWritten - resumeOffset).coerceAtLeast(0L)
-                        val speed = formatSpeed(sessionBytes / elapsedSec)
-                        val prog = (totalWritten.toFloat() / totalSize).coerceIn(0f, 1f)
-                        val shouldPersist = (totalWritten - lastPersistBytes) >= 1024 * 1024L
-                        if (shouldPersist) lastPersistBytes = totalWritten
+                val reporter = TransferProgressReporter(
+                    totalSize = totalSize,
+                    initialBytes = resumeOffset,
+                    onEmit = { bytes, prog, speed, persist ->
                         workingTask = workingTask.copy(
-                            bytesTransferred = totalWritten,
+                            bytesTransferred = bytes,
                             progress = prog,
                             speed = speed
                         )
-                        onUpdate(workingTask, shouldPersist)
-                        lastNotify = now
+                        onUpdate(workingTask, persist)
                     }
+                )
+
+                val outcome = uploadWithBufferedPipeline(
+                    readSource = readSource,
+                    smbRaf = activeSmbRaf,
+                    startOffset = resumeOffset,
+                    totalSize = totalSize,
+                    isPaused = isPaused,
+                    isCancelled = isCancelled,
+                    onChunkWritten = { bytesWritten, chunkLen ->
+                        reporter.recordAndMaybeNotify(bytesWritten, chunkLen)
+                    }
+                )
+
+                totalWritten = outcome.bytesTransferred
+                if (outcome.cancelled) {
+                    try { activeSmbRaf.close() } catch (_: Exception) {}
+                    smbRaf = null
+                    try { remoteTemp.delete() } catch (_: Exception) {}
+                    val cancelled = workingTask.copy(
+                        bytesTransferred = 0L,
+                        progress = 0f,
+                        speed = "",
+                        status = SmbTransferStatus.CANCELLED
+                    )
+                    onUpdate(cancelled, true)
+                    return cancelled
+                }
+
+                if (outcome.paused) {
+                    val paused = workingTask.copy(
+                        bytesTransferred = totalWritten,
+                        progress = (totalWritten.toFloat() / totalSize).coerceIn(0f, 1f),
+                        speed = "",
+                        status = SmbTransferStatus.PAUSED
+                    )
+                    onUpdate(paused, true)
+                    return paused
                 }
 
                 activeSmbRaf.close()
@@ -1056,6 +1136,325 @@ object SmbClientManager {
             try { smbRaf?.close() } catch (_: Exception) {}
             try { remoteTemp?.close() } catch (_: Exception) {}
             try { remoteDir?.close() } catch (_: Exception) {}
+        }
+    }
+
+    private data class PipelineOutcome(
+        val bytesTransferred: Long,
+        val paused: Boolean = false,
+        val cancelled: Boolean = false
+    )
+
+    private class TransferProgressReporter(
+        private val totalSize: Long,
+        initialBytes: Long,
+        private val onEmit: (bytesTransferred: Long, progress: Float, speed: String, persist: Boolean) -> Unit
+    ) {
+        private val speedMeter = SlidingSpeedMeter()
+        private var lastNotifyAt = System.currentTimeMillis()
+        private var lastPersistBytes = initialBytes
+
+        fun recordAndMaybeNotify(totalBytes: Long, deltaBytes: Int) {
+            if (deltaBytes > 0) {
+                speedMeter.record(deltaBytes.toLong())
+            }
+            val now = System.currentTimeMillis()
+            if (now - lastNotifyAt >= PROGRESS_NOTIFY_INTERVAL_MS) {
+                val speed = formatSpeed(speedMeter.getBytesPerSecond(now).toDouble())
+                val prog = if (totalSize > 0L) (totalBytes.toFloat() / totalSize).coerceIn(0f, 1f) else 0f
+                val shouldPersist = (totalBytes - lastPersistBytes) >= 2L * 1024 * 1024L
+                if (shouldPersist) lastPersistBytes = totalBytes
+                onEmit(totalBytes, prog, speed, shouldPersist)
+                lastNotifyAt = now
+            }
+        }
+    }
+
+    private fun readFullyFromRaf(raf: SmbRandomAccess, dest: ByteArray, targetBytes: Int): Int {
+        var total = 0
+        while (total < targetBytes) {
+            val n = raf.read(dest, total, targetBytes - total)
+            if (n <= 0) break
+            total += n
+        }
+        return total
+    }
+
+    private fun readFullyFromSource(
+        readSource: (ByteArray, Int, Int) -> Int,
+        dest: ByteArray,
+        targetBytes: Int
+    ): Int {
+        var total = 0
+        while (total < targetBytes) {
+            val n = readSource(dest, total, targetBytes - total)
+            if (n <= 0) break
+            total += n
+        }
+        return total
+    }
+
+    private fun downloadSingleStream(
+        smbRaf: SmbRandomAccess,
+        startOffset: Long,
+        actualSize: Long,
+        localRaf: RandomAccessFile,
+        isPaused: () -> Boolean,
+        isCancelled: () -> Boolean,
+        onChunkWritten: (totalBytes: Long, chunkBytes: Int) -> Unit
+    ): PipelineOutcome {
+        var totalCopied = startOffset
+        val buffer = ByteArray(TRANSFER_BUFFER_SIZE)
+        while (totalCopied < actualSize) {
+            if (isCancelled()) return PipelineOutcome(totalCopied, cancelled = true)
+            if (isPaused()) return PipelineOutcome(totalCopied, paused = true)
+            val toRead = minOf(buffer.size.toLong(), actualSize - totalCopied).toInt()
+            val n = smbRaf.read(buffer, 0, toRead)
+            if (n <= 0) break
+            localRaf.write(buffer, 0, n)
+            totalCopied += n
+            onChunkWritten(totalCopied, n)
+        }
+        return PipelineOutcome(totalCopied)
+    }
+
+    /**
+     * 3路并发分片预取 + 有序滑动窗口写盘：消除单路 RTT 停等与磁盘 IO 串行等待，
+     * 同时保证 .smbpart 文件始终从 startOffset 起严格连续落盘，断点续传 100% 精确。
+     */
+    private fun downloadParallelWithWindow(
+        ctx: CIFSContext,
+        primaryFile: SmbFile,
+        remoteUrl: String,
+        startOffset: Long,
+        actualSize: Long,
+        localRaf: RandomAccessFile,
+        isPaused: () -> Boolean,
+        isCancelled: () -> Boolean,
+        onChunkWritten: (totalBytes: Long, chunkBytes: Int) -> Unit
+    ): PipelineOutcome = runBlocking(Dispatchers.IO) {
+        val nextDispatchOffset = AtomicLong(startOffset)
+        val contiguousWritten = AtomicLong(startOffset)
+        val readyChunks = ConcurrentHashMap<Long, ByteArray>()
+        val signal = Channel<Unit>(Channel.CONFLATED)
+        val aborted = AtomicBoolean(false)
+        val workerError = AtomicReference<Throwable?>(null)
+        val activeWorkers = java.util.concurrent.atomic.AtomicInteger(DOWNLOAD_PARALLEL_WORKERS)
+        val openRafs = ConcurrentHashMap.newKeySet<SmbRandomAccess>()
+
+        val workerJobs = (0 until DOWNLOAD_PARALLEL_WORKERS).map { workerIdx ->
+            launch {
+                var extraSmbFile: SmbFile? = null
+                var workerRaf: SmbRandomAccess? = null
+                try {
+                    val targetFile = if (workerIdx == 0) {
+                        primaryFile
+                    } else {
+                        SmbFile(remoteUrl, ctx).also { extraSmbFile = it }
+                    }
+                    val opened = try {
+                        targetFile.openRandomAccess("r")
+                    } catch (e: Exception) {
+                        // 老旧设备限制同文件多读句柄时，辅助通道静默退让给主通道
+                        if (workerIdx > 0) return@launch
+                        throw e
+                    }
+                    workerRaf = opened
+                    openRafs.add(opened)
+                    var localCursor = -1L
+
+                    while (!aborted.get() && !isPaused() && !isCancelled()) {
+                        while (!aborted.get() && !isPaused() && !isCancelled()) {
+                            val inFlightWindow = nextDispatchOffset.get() - contiguousWritten.get()
+                            if (inFlightWindow < DOWNLOAD_WINDOW_CHUNKS * TRANSFER_BUFFER_SIZE.toLong()) {
+                                break
+                            }
+                            kotlinx.coroutines.delay(10)
+                        }
+                        if (aborted.get() || isPaused() || isCancelled()) break
+
+                        val offset = nextDispatchOffset.getAndAdd(TRANSFER_BUFFER_SIZE.toLong())
+                        if (offset >= actualSize) break
+
+                        if (localCursor != offset) {
+                            opened.seek(offset)
+                            localCursor = offset
+                        }
+                        val targetLen = minOf(TRANSFER_BUFFER_SIZE.toLong(), actualSize - offset).toInt()
+                        val buf = ByteArray(targetLen)
+                        val readBytes = readFullyFromRaf(opened, buf, targetLen)
+                        localCursor += readBytes
+
+                        val chunk = if (readBytes == targetLen) buf else buf.copyOf(readBytes)
+                        readyChunks[offset] = chunk
+                        signal.trySend(Unit)
+                        if (readBytes < targetLen) break
+                    }
+                } catch (e: Throwable) {
+                    if (!aborted.get() && e !is CancellationException) {
+                        workerError.compareAndSet(null, e)
+                        signal.trySend(Unit)
+                    }
+                } finally {
+                    workerRaf?.let {
+                        openRafs.remove(it)
+                        try { it.close() } catch (_: Exception) {}
+                    }
+                    try { extraSmbFile?.close() } catch (_: Exception) {}
+                    if (activeWorkers.decrementAndGet() <= 0) {
+                        signal.trySend(Unit)
+                    }
+                }
+            }
+        }
+
+        var written = startOffset
+        try {
+            while (written < actualSize) {
+                if (isCancelled()) {
+                    aborted.set(true)
+                    openRafs.forEach { try { it.close() } catch (_: Exception) {} }
+                    workerJobs.forEach { it.cancel() }
+                    return@runBlocking PipelineOutcome(written, cancelled = true)
+                }
+                if (isPaused()) {
+                    aborted.set(true)
+                    openRafs.forEach { try { it.close() } catch (_: Exception) {} }
+                    workerJobs.forEach { it.cancel() }
+                    return@runBlocking PipelineOutcome(written, paused = true)
+                }
+
+                var madeProgress = false
+                while (written < actualSize) {
+                    val chunk = readyChunks.remove(written) ?: break
+                    if (chunk.isEmpty()) {
+                        aborted.set(true)
+                        return@runBlocking PipelineOutcome(written)
+                    }
+                    localRaf.write(chunk)
+                    written += chunk.size
+                    contiguousWritten.set(written)
+                    onChunkWritten(written, chunk.size)
+                    madeProgress = true
+                }
+
+                workerError.get()?.let { err ->
+                    aborted.set(true)
+                    openRafs.forEach { try { it.close() } catch (_: Exception) {} }
+                    workerJobs.forEach { it.cancel() }
+                    throw err
+                }
+
+                if (written >= actualSize) break
+                if (activeWorkers.get() <= 0 && !readyChunks.containsKey(written)) {
+                    break
+                }
+                if (!madeProgress) {
+                    withTimeoutOrNull(180) {
+                        signal.receiveCatching()
+                    }
+                }
+            }
+            PipelineOutcome(written)
+        } finally {
+            aborted.set(true)
+            signal.close()
+            openRafs.forEach { try { it.close() } catch (_: Exception) {} }
+            workerJobs.forEach { it.cancel() }
+            workerJobs.forEach { try { it.join() } catch (_: Exception) {} }
+            readyChunks.clear()
+        }
+    }
+
+    private data class UploadChunk(
+        val data: ByteArray,
+        val length: Int
+    )
+
+    /**
+     * 双缓冲异步预读上传流水线：本地源读取与 SMB 1MB 块发送完全并行，循环池复用内存零 GC。
+     */
+    private fun uploadWithBufferedPipeline(
+        readSource: (ByteArray, Int, Int) -> Int,
+        smbRaf: SmbRandomAccess,
+        startOffset: Long,
+        totalSize: Long,
+        isPaused: () -> Boolean,
+        isCancelled: () -> Boolean,
+        onChunkWritten: (totalBytes: Long, chunkBytes: Int) -> Unit
+    ): PipelineOutcome = runBlocking(Dispatchers.IO) {
+        val dataChannel = Channel<UploadChunk>(capacity = 3)
+        val recycleChannel = Channel<ByteArray>(capacity = 4)
+        repeat(4) { recycleChannel.trySend(ByteArray(TRANSFER_BUFFER_SIZE)) }
+
+        val aborted = AtomicBoolean(false)
+        val producerError = AtomicReference<Throwable?>(null)
+
+        val producerJob = launch {
+            var remaining = totalSize - startOffset
+            try {
+                while (remaining > 0L && !aborted.get() && !isPaused() && !isCancelled()) {
+                    val buf = recycleChannel.receiveCatching().getOrNull() ?: break
+                    val want = minOf(buf.size.toLong(), remaining).toInt()
+                    val readBytes = readFullyFromSource(readSource, buf, want)
+                    if (readBytes <= 0) {
+                        recycleChannel.trySend(buf)
+                        break
+                    }
+                    remaining -= readBytes
+                    val sent = dataChannel.trySend(UploadChunk(buf, readBytes))
+                    if (!sent.isSuccess) {
+                        dataChannel.send(UploadChunk(buf, readBytes))
+                    }
+                }
+            } catch (e: Throwable) {
+                if (!aborted.get() && e !is CancellationException) {
+                    producerError.set(e)
+                }
+            } finally {
+                dataChannel.close()
+            }
+        }
+
+        var totalWritten = startOffset
+        try {
+            while (totalWritten < totalSize) {
+                if (isCancelled()) {
+                    aborted.set(true)
+                    return@runBlocking PipelineOutcome(totalWritten, cancelled = true)
+                }
+                if (isPaused()) {
+                    aborted.set(true)
+                    return@runBlocking PipelineOutcome(totalWritten, paused = true)
+                }
+
+                val nextChunk = withTimeoutOrNull(180) {
+                    dataChannel.receiveCatching()
+                }
+                if (nextChunk == null) {
+                    continue
+                }
+                if (nextChunk.isClosed) {
+                    producerError.get()?.let { throw it }
+                    break
+                }
+                val chunk = nextChunk.getOrNull() ?: break
+                try {
+                    smbRaf.write(chunk.data, 0, chunk.length)
+                    totalWritten += chunk.length
+                    onChunkWritten(totalWritten, chunk.length)
+                } finally {
+                    recycleChannel.trySend(chunk.data)
+                }
+            }
+            producerError.get()?.let { throw it }
+            PipelineOutcome(totalWritten)
+        } finally {
+            aborted.set(true)
+            dataChannel.close()
+            recycleChannel.close()
+            producerJob.cancel()
+            try { producerJob.join() } catch (_: Exception) {}
         }
     }
 
@@ -1179,7 +1578,7 @@ object SmbClientManager {
         }
     }
 
-    private fun resolveMimeType(fileName: String): String {
+    internal fun resolveMimeType(fileName: String): String {
         val ext = fileName.substringAfterLast('.', "").lowercase(Locale.ROOT)
         return when (ext) {
             "mp4", "m4v" -> "video/mp4"
@@ -1187,15 +1586,28 @@ object SmbClientManager {
             "avi" -> "video/x-msvideo"
             "mov" -> "video/quicktime"
             "webm" -> "video/webm"
-            "ts" -> "video/mp2t"
+            "ts", "m2ts", "mts" -> "video/mp2t"
             "flv" -> "video/x-flv"
+            "wmv", "asf" -> "video/x-ms-wmv"
+            "mpg", "mpeg", "vob" -> "video/mpeg"
+            "rmvb", "rm" -> "application/vnd.rn-realmedia-vbr"
             "3gp" -> "video/3gpp"
+            "3g2" -> "video/3gpp2"
+            "ogv" -> "video/ogg"
             "mp3" -> "audio/mpeg"
             "flac" -> "audio/flac"
             "wav" -> "audio/wav"
             "aac" -> "audio/aac"
             "m4a" -> "audio/mp4"
-            "ogg" -> "audio/ogg"
+            "ogg", "opus" -> "audio/ogg"
+            "wma" -> "audio/x-ms-wma"
+            "ape" -> "audio/x-ape"
+            "alac" -> "audio/alac"
+            "aiff" -> "audio/aiff"
+            "dsf" -> "audio/dsf"
+            "srt" -> "application/x-subrip"
+            "ass", "ssa" -> "text/x-ssa"
+            "vtt" -> "text/vtt"
             else -> FileUtils.getMimeType(File(fileName))
         }
     }

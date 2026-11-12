@@ -5,10 +5,13 @@ import android.net.Uri
 import android.os.Environment
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.media3.common.MimeTypes
 import com.gemini.filemanager.core.smb.LocalUploadSource
 import com.gemini.filemanager.core.smb.SmbClientManager
 import com.gemini.filemanager.core.smb.SmbConnectionStore
 import com.gemini.filemanager.core.smb.SmbDiscovery
+import com.gemini.filemanager.core.smb.SmbPlaybackStore
+import com.gemini.filemanager.core.smb.SmbStreamRegistry
 import com.gemini.filemanager.core.smb.SmbTransferManager
 import com.gemini.filemanager.data.model.FileCategory
 import com.gemini.filemanager.data.model.SmbCategoryFilter
@@ -21,6 +24,9 @@ import com.gemini.filemanager.data.model.SmbSortOption
 import com.gemini.filemanager.data.model.SmbTransferDirection
 import com.gemini.filemanager.data.model.SmbTransferStatus
 import com.gemini.filemanager.data.model.SmbTransferTask
+import com.gemini.filemanager.ui.components.PlayableMediaItem
+import com.gemini.filemanager.ui.components.PlayableSubtitleItem
+import com.gemini.filemanager.ui.components.PreparedMediaSource
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -64,6 +70,7 @@ data class SmbUiState(
 class SmbViewModel(application: Application) : AndroidViewModel(application) {
 
     private val store = SmbConnectionStore(application)
+    private val playbackStore = SmbPlaybackStore(application)
     private val _uiState = MutableStateFlow(SmbUiState())
     val uiState: StateFlow<SmbUiState> = _uiState.asStateFlow()
 
@@ -709,6 +716,97 @@ class SmbViewModel(application: Application) : AndroidViewModel(application) {
 
     fun getCurrentFolderImages(): List<SmbRemoteFile> {
         return _uiState.value.filteredFiles.filter { !it.isDirectory && it.category == FileCategory.IMAGE }
+    }
+
+    /**
+     * 获取当前目录同类型可连播的音视频队列（确保目标文件一定在队列中）。
+     */
+    fun getPlayableMediaQueue(targetItem: SmbRemoteFile): List<SmbRemoteFile> {
+        val list = _uiState.value.filteredFiles.filter {
+            !it.isDirectory && it.category == targetItem.category
+        }
+        return when {
+            list.isEmpty() -> listOf(targetItem)
+            list.any { it.smbUrl == targetItem.smbUrl } -> list
+            else -> listOf(targetItem) + list
+        }
+    }
+
+    /**
+     * 准备单个 SMB 音视频播放源（同时自动发现并缓存同目录下匹配的外挂字幕）。
+     */
+    suspend fun preparePlayableMediaSource(mediaItem: PlayableMediaItem): PreparedMediaSource? {
+        val config = _uiState.value.activeConfig ?: return null
+        val state = _uiState.value
+        val targetFile = state.files.firstOrNull { it.smbUrl == mediaItem.id }
+            ?: state.filteredFiles.firstOrNull { it.smbUrl == mediaItem.id }
+            ?: SmbRemoteFile(
+                name = mediaItem.title,
+                smbUrl = mediaItem.id,
+                isDirectory = false,
+                size = mediaItem.fileSizeBytes
+            )
+
+        return withContext(Dispatchers.IO) {
+            val prepared = SmbClientManager.prepareStreamTarget(config, targetFile)
+            val matchedSubtitles = if (!mediaItem.isAudio) {
+                SmbClientManager.findMatchingSubtitles(targetFile, state.files)
+            } else {
+                emptyList()
+            }
+            val cacheRoot = getApplication<Application>().cacheDir
+            val subtitleItems = matchedSubtitles.mapNotNull { subFile ->
+                val mime = resolveSubtitleMimeType(subFile.name) ?: return@mapNotNull null
+                val cachedResult = SmbClientManager.downloadToCacheForPreview(
+                    config = config,
+                    remoteFile = subFile,
+                    cacheRootDir = cacheRoot
+                )
+                val localSubFile = cachedResult.getOrNull() ?: return@mapNotNull null
+                PlayableSubtitleItem(
+                    uri = Uri.fromFile(localSubFile),
+                    label = subFile.name,
+                    mimeType = mime
+                )
+            }
+            PreparedMediaSource(
+                mediaItem = mediaItem.copy(
+                    directUri = Uri.parse(prepared.directUri),
+                    externalUrl = prepared.httpUrl,
+                    mimeType = prepared.mimeType,
+                    subtitles = subtitleItems
+                ),
+                streamToken = prepared.token
+            )
+        }
+    }
+
+    private fun resolveSubtitleMimeType(fileName: String): String? {
+        val ext = fileName.substringAfterLast('.', "").lowercase(Locale.ROOT)
+        return when (ext) {
+            "srt" -> MimeTypes.APPLICATION_SUBRIP
+            "ass", "ssa" -> MimeTypes.TEXT_SSA
+            "vtt" -> MimeTypes.TEXT_VTT
+            else -> null
+        }
+    }
+
+    fun getSavedPlaybackPosition(mediaId: String): Long = playbackStore.getSavedPosition(mediaId)
+
+    fun savePlaybackProgress(mediaId: String, positionMs: Long, durationMs: Long) {
+        playbackStore.saveProgress(mediaId, positionMs, durationMs)
+    }
+
+    fun clearPlaybackProgress(mediaId: String) {
+        playbackStore.clearProgress(mediaId)
+    }
+
+    fun getStreamSpeedBytesPerSec(streamToken: String): Long {
+        return SmbStreamRegistry.getStreamSpeedBytesPerSec(streamToken)
+    }
+
+    fun releaseStreamToken(streamToken: String) {
+        SmbStreamRegistry.release(streamToken)
     }
 
     override fun onCleared() {

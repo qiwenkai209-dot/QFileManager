@@ -2,38 +2,27 @@ package com.gemini.filemanager.core.smb
 
 import android.net.Uri
 import fi.iki.elonen.NanoHTTPD
-import org.codelibs.jcifs.smb.CIFSContext
-import org.codelibs.jcifs.smb.SmbRandomAccess
-import org.codelibs.jcifs.smb.impl.SmbFile
 import java.io.ByteArrayInputStream
 import java.io.IOException
-import java.io.InputStream
 import java.net.ServerSocket
-import java.util.UUID
-import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.min
-
-data class SmbStreamTarget(
-    val smbUrl: String,
-    val context: CIFSContext,
-    val fileName: String,
-    val fileSize: Long,
-    val mimeType: String,
-    val createdAt: Long = System.currentTimeMillis()
-)
 
 class SmbHttpStreamServer private constructor(port: Int) : NanoHTTPD("127.0.0.1", port) {
 
-    private val targets = ConcurrentHashMap<String, SmbStreamTarget>()
+    init {
+        setAsyncRunner(PooledAsyncRunner())
+    }
 
     fun registerTarget(target: SmbStreamTarget): String {
-        if (targets.size > 20) {
-            val oldest = targets.entries.minByOrNull { it.value.createdAt }?.key
-            if (oldest != null) targets.remove(oldest)
-        }
-        val token = UUID.randomUUID().toString()
-        targets[token] = target
-        val encodedName = Uri.encode(target.fileName)
+        val token = SmbStreamRegistry.register(target)
+        return buildHttpUrl(token, target.fileName)
+    }
+
+    fun buildHttpUrl(token: String, fileName: String): String {
+        val encodedName = Uri.encode(fileName)
         return "http://127.0.0.1:$listeningPort/stream/$token/$encodedName"
     }
 
@@ -49,25 +38,24 @@ class SmbHttpStreamServer private constructor(port: Int) : NanoHTTPD("127.0.0.1"
         }
 
         val token = segments[1]
-        val target = targets[token] ?: return newFixedLengthResponse(
+        val target = SmbStreamRegistry.getTarget(token) ?: return newFixedLengthResponse(
+            Response.Status.NOT_FOUND,
+            MIME_PLAINTEXT,
+            "Stream Expired"
+        )
+        val streamSession = SmbStreamRegistry.getSession(token) ?: return newFixedLengthResponse(
             Response.Status.NOT_FOUND,
             MIME_PLAINTEXT,
             "Stream Expired"
         )
 
-        var smbFile: SmbFile? = null
-        var raf: SmbRandomAccess? = null
         return try {
-            smbFile = SmbFile(target.smbUrl, target.context)
-            val totalSize = if (target.fileSize > 0L) target.fileSize else smbFile.length()
+            val totalSize = streamSession.totalSize
             if (totalSize <= 0L) {
-                smbFile.close()
                 return newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "Empty File")
             }
 
-            val rangeHeader = session.headers["range"]
             if (session.method == Method.HEAD) {
-                smbFile.close()
                 return newFixedLengthResponse(
                     Response.Status.OK,
                     target.mimeType,
@@ -79,10 +67,14 @@ class SmbHttpStreamServer private constructor(port: Int) : NanoHTTPD("127.0.0.1"
                 }
             }
 
-            if (rangeHeader != null && rangeHeader.startsWith("bytes=")) {
-                val rangeSpec = rangeHeader.removePrefix("bytes=").substringBefore(",").trim()
+            val rangeHeader = session.headers.entries
+                .firstOrNull { it.key.equals("range", ignoreCase = true) }
+                ?.value
+                ?.trim()
+
+            if (rangeHeader != null && rangeHeader.startsWith("bytes=", ignoreCase = true)) {
+                val rangeSpec = rangeHeader.substring(6).substringBefore(",").trim()
                 val (start, end) = parseByteRange(rangeSpec, totalSize) ?: run {
-                    smbFile.close()
                     return newFixedLengthResponse(
                         Response.Status.RANGE_NOT_SATISFIABLE,
                         MIME_PLAINTEXT,
@@ -93,9 +85,7 @@ class SmbHttpStreamServer private constructor(port: Int) : NanoHTTPD("127.0.0.1"
                 }
 
                 val contentLength = end - start + 1L
-                raf = smbFile.openRandomAccess("r")
-                raf.seek(start)
-                val stream = SmbRandomAccessInputStream(smbFile, raf, contentLength)
+                val stream = streamSession.openInputStream(start, contentLength)
                 newFixedLengthResponse(
                     Response.Status.PARTIAL_CONTENT,
                     target.mimeType,
@@ -106,8 +96,7 @@ class SmbHttpStreamServer private constructor(port: Int) : NanoHTTPD("127.0.0.1"
                     addHeader("Content-Range", "bytes $start-$end/$totalSize")
                 }
             } else {
-                raf = smbFile.openRandomAccess("r")
-                val stream = SmbRandomAccessInputStream(smbFile, raf, totalSize)
+                val stream = streamSession.openInputStream(0L, totalSize)
                 newFixedLengthResponse(
                     Response.Status.OK,
                     target.mimeType,
@@ -118,8 +107,6 @@ class SmbHttpStreamServer private constructor(port: Int) : NanoHTTPD("127.0.0.1"
                 }
             }
         } catch (e: Exception) {
-            try { raf?.close() } catch (_: Exception) {}
-            try { smbFile?.close() } catch (_: Exception) {}
             newFixedLengthResponse(
                 Response.Status.INTERNAL_ERROR,
                 MIME_PLAINTEXT,
@@ -128,85 +115,33 @@ class SmbHttpStreamServer private constructor(port: Int) : NanoHTTPD("127.0.0.1"
         }
     }
 
-    private class SmbRandomAccessInputStream(
-        private val smbFile: SmbFile,
-        private val raf: SmbRandomAccess,
-        private var remaining: Long
-    ) : InputStream() {
-
-        private val buffer = ByteArray(128 * 1024)
-        private var bufferPos = 0
-        private var bufferLimit = 0
-        @Volatile
-        private var closed = false
-
-        override fun read(): Int {
-            if (closed || remaining <= 0L) return -1
-            if (bufferPos >= bufferLimit) {
-                if (!refillBuffer()) return -1
-            }
-            remaining--
-            return buffer[bufferPos++].toInt() and 0xFF
-        }
-
-        override fun read(b: ByteArray, off: Int, len: Int): Int {
-            if (closed) return -1
-            if (len == 0) return 0
-            if (remaining <= 0L) return -1
-            if (bufferPos < bufferLimit) {
-                val available = bufferLimit - bufferPos
-                val toCopy = minOf(len, available, remaining.coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
-                System.arraycopy(buffer, bufferPos, b, off, toCopy)
-                bufferPos += toCopy
-                remaining -= toCopy
-                return toCopy
-            }
-            val toRead = minOf(len.toLong(), remaining).toInt()
-            return if (toRead >= buffer.size) {
-                val n = raf.read(b, off, toRead)
-                if (n <= 0) -1 else {
-                    remaining -= n
-                    n
-                }
-            } else {
-                if (!refillBuffer()) return -1
-                val available = bufferLimit - bufferPos
-                val toCopy = minOf(len, available, remaining.coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
-                System.arraycopy(buffer, bufferPos, b, off, toCopy)
-                bufferPos += toCopy
-                remaining -= toCopy
-                toCopy
+    private class PooledAsyncRunner : AsyncRunner {
+        private val threadId = AtomicInteger(1)
+        private val executor: ExecutorService = Executors.newCachedThreadPool { runnable ->
+            Thread(runnable, "smb-http-proxy-${threadId.getAndIncrement()}").apply {
+                isDaemon = true
             }
         }
+        private val running = java.util.Collections.synchronizedList(mutableListOf<ClientHandler>())
 
-        private fun refillBuffer(): Boolean {
-            if (remaining <= 0L) return false
-            val toRead = minOf(buffer.size.toLong(), remaining).toInt()
-            val n = raf.read(buffer, 0, toRead)
-            if (n <= 0) {
-                remaining = 0L
-                return false
-            }
-            bufferPos = 0
-            bufferLimit = n
-            return true
+        override fun closeAll() {
+            val snapshot = synchronized(running) { running.toList() }
+            snapshot.forEach { it.close() }
         }
 
-        override fun close() {
-            if (closed) return
-            closed = true
-            try {
-                raf.close()
-            } catch (_: Exception) {
-            }
-            try {
-                smbFile.close()
-            } catch (_: Exception) {
-            }
+        override fun closed(clientHandler: ClientHandler) {
+            running.remove(clientHandler)
+        }
+
+        override fun exec(code: ClientHandler) {
+            running.add(code)
+            executor.execute(code)
         }
     }
 
     companion object {
+        private const val STREAM_SOCKET_TIMEOUT_MS = 30_000
+
         @Volatile
         private var instance: SmbHttpStreamServer? = null
 
@@ -244,7 +179,7 @@ class SmbHttpStreamServer private constructor(port: Int) : NanoHTTPD("127.0.0.1"
                     try {
                         val freePort = ServerSocket(0).use { it.localPort }
                         val server = SmbHttpStreamServer(freePort)
-                        server.start(SOCKET_READ_TIMEOUT, false)
+                        server.start(STREAM_SOCKET_TIMEOUT_MS, false)
                         instance = server
                         return server
                     } catch (e: IOException) {
