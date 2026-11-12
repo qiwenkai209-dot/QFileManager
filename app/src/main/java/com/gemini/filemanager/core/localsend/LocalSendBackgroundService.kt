@@ -62,12 +62,7 @@ class LocalSendBackgroundService : Service() {
         private const val CHANNEL_ID = "file_manager_service_channel"
 
         fun startService(context: Context) {
-            val intent = Intent(context, LocalSendBackgroundService::class.java)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
-            }
+            com.gemini.filemanager.core.background.AppBackgroundKeepAliveManager.ensureStartedFromForeground(context)
         }
     }
 }

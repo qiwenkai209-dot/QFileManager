@@ -1,5 +1,6 @@
 package com.gemini.filemanager.ui.screens.home
 
+import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -15,10 +16,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.gemini.filemanager.core.background.AppBackgroundKeepAliveManager
+import com.gemini.filemanager.core.background.KeepAliveUiState
 import com.gemini.filemanager.core.file.FileUtils
 import com.gemini.filemanager.data.model.FileCategory
 import com.gemini.filemanager.ui.theme.*
@@ -36,9 +40,13 @@ fun HomeScreen(
 ) {
     val state by viewModel.uiState.collectAsState()
     val discoveredDevices by viewModel.discoveredDevices.collectAsState()
+    val keepAliveState by viewModel.keepAliveState.collectAsState()
+    val context = LocalContext.current
+    var showKeepAliveDialog by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         viewModel.refreshSmbCount()
+        viewModel.refreshKeepAliveStatus()
     }
 
     Scaffold(
@@ -59,6 +67,48 @@ fun HomeScreen(
                     }
                 },
                 actions = {
+                    Surface(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(50))
+                            .clickable { showKeepAliveDialog = true },
+                        color = if (keepAliveState.isServiceRunning || keepAliveState.keepAliveEnabled) {
+                            Color(0xFF00897B).copy(alpha = 0.14f)
+                        } else {
+                            MaterialTheme.colorScheme.surfaceVariant
+                        },
+                        shape = RoundedCornerShape(50)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = if (keepAliveState.isWakeLockHeld) Icons.Default.Bolt else Icons.Default.Shield,
+                                contentDescription = "后台防休眠",
+                                tint = if (keepAliveState.isServiceRunning || keepAliveState.keepAliveEnabled) {
+                                    Color(0xFF00897B)
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                },
+                                modifier = Modifier.size(15.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = when {
+                                    keepAliveState.activeTaskReasons.isNotEmpty() -> "锁屏防休眠"
+                                    keepAliveState.keepAliveEnabled -> "后台保活中"
+                                    else -> "保活已关"
+                                },
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = if (keepAliveState.isServiceRunning || keepAliveState.keepAliveEnabled) {
+                                    Color(0xFF00897B)
+                                } else {
+                                    MaterialTheme.colorScheme.onSurfaceVariant
+                                }
+                            )
+                        }
+                    }
                     IconButton(onClick = { viewModel.loadOverview() }) {
                         Icon(Icons.Default.Refresh, contentDescription = "刷新")
                     }
@@ -155,6 +205,14 @@ fun HomeScreen(
                 )
             }
 
+            item {
+                BackgroundKeepAliveCard(
+                    keepAliveState = keepAliveState,
+                    onToggleKeepAlive = { enabled -> viewModel.setKeepAliveEnabled(enabled) },
+                    onOpenDetails = { showKeepAliveDialog = true }
+                )
+            }
+
             // 3. 基础分类管理
             item {
                 Text(
@@ -222,6 +280,33 @@ fun HomeScreen(
                 }
             }
         }
+    }
+
+    if (showKeepAliveDialog) {
+        BackgroundKeepAliveDialog(
+            state = keepAliveState,
+            onToggleKeepAlive = { enabled -> viewModel.setKeepAliveEnabled(enabled) },
+            onToggleStrictWakeLock = { enabled -> viewModel.setStrictWakeLockEnabled(enabled) },
+            onRequestBatteryWhitelist = {
+                try {
+                    context.startActivity(AppBackgroundKeepAliveManager.buildIgnoreBatteryOptimizationIntent(context))
+                } catch (_: Exception) {
+                    try {
+                        context.startActivity(AppBackgroundKeepAliveManager.buildBatteryOptimizationSettingsFallbackIntent())
+                    } catch (_: Exception) {
+                        Toast.makeText(context, "请在系统设置中手动允许 Q管理 后台无限制运行", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            },
+            onRequestNotificationSettings = {
+                try {
+                    context.startActivity(AppBackgroundKeepAliveManager.buildAppNotificationSettingsIntent(context))
+                } catch (_: Exception) {
+                    Toast.makeText(context, "请在系统设置中开启通知权限", Toast.LENGTH_SHORT).show()
+                }
+            },
+            onDismiss = { showKeepAliveDialog = false }
+        )
     }
 }
 
@@ -457,4 +542,224 @@ fun FeatureWideCard(
             )
         }
     }
+}
+
+@Composable
+fun BackgroundKeepAliveCard(
+    keepAliveState: KeepAliveUiState,
+    onToggleKeepAlive: (Boolean) -> Unit,
+    onOpenDetails: () -> Unit
+) {
+    val activeSummary = AppBackgroundKeepAliveManager.formatActiveReasonsSummary(keepAliveState.activeTaskReasons)
+    val accent = if (keepAliveState.keepAliveEnabled || keepAliveState.activeTaskReasons.isNotEmpty()) {
+        Color(0xFF00897B)
+    } else {
+        MaterialTheme.colorScheme.outline
+    }
+    val statusText = buildString {
+        when {
+            activeSummary.isNotEmpty() -> append("活跃保护中: $activeSummary")
+            keepAliveState.strictWakeLockEnabled -> append("锁屏强保活已开启 · CPU/Wi-Fi 唤醒锁保持中")
+            keepAliveState.keepAliveEnabled -> append("前台常驻守护中 · 传输/转码自动锁定防休眠")
+            else -> append("常驻保活已关闭 · 仅在传输或转码期间临时防休眠")
+        }
+        if (!keepAliveState.isIgnoringBatteryOptimizations) {
+            append("\n提示：尚未加入系统电池优化白名单，点击可一键设置")
+        }
+    }
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(18.dp))
+            .clickable { onOpenDetails() },
+        shape = RoundedCornerShape(18.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = accent.copy(alpha = 0.10f)
+        )
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(44.dp)
+                    .clip(CircleShape)
+                    .background(accent.copy(alpha = 0.18f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = if (keepAliveState.isWakeLockHeld) Icons.Default.Bolt else Icons.Default.BatteryChargingFull,
+                    contentDescription = null,
+                    tint = accent,
+                    modifier = Modifier.size(22.dp)
+                )
+            }
+            Spacer(modifier = Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = "后台运行防休眠",
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    if (keepAliveState.isWakeLockHeld || keepAliveState.isWifiLockHeld) {
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Surface(
+                            color = accent.copy(alpha = 0.18f),
+                            shape = RoundedCornerShape(6.dp)
+                        ) {
+                            Text(
+                                text = if (keepAliveState.isWifiLockHeld) "CPU+Wi-Fi锁" else "CPU锁",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = accent,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                            )
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = statusText,
+                    fontSize = 11.sp,
+                    lineHeight = 15.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+            Spacer(modifier = Modifier.width(8.dp))
+            Switch(
+                checked = keepAliveState.keepAliveEnabled,
+                onCheckedChange = onToggleKeepAlive
+            )
+        }
+    }
+}
+
+@Composable
+private fun BackgroundKeepAliveDialog(
+    state: KeepAliveUiState,
+    onToggleKeepAlive: (Boolean) -> Unit,
+    onToggleStrictWakeLock: (Boolean) -> Unit,
+    onRequestBatteryWhitelist: () -> Unit,
+    onRequestNotificationSettings: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("后台运行与防休眠设置") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("后台常驻守护服务", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                        Text(
+                            "保持前台低功耗守护，防止切后台后 LocalSend 与传输服务被系统回收",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = state.keepAliveEnabled,
+                        onCheckedChange = onToggleKeepAlive
+                    )
+                }
+
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("锁屏始终防休眠（强保活）", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                        Text(
+                            "关闭屏幕待机时也持续保持 CPU 与 Wi-Fi 唤醒锁；关闭此项则在任务结束后自动释放锁以省电",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = state.strictWakeLockEnabled,
+                        onCheckedChange = onToggleStrictWakeLock
+                    )
+                }
+
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("忽略系统电池优化", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                        Text(
+                            if (state.isIgnoringBatteryOptimizations) "已加入白名单（系统不会主动休眠本应用）" else "建议设为「无限制/不优化」防止厂商杀后台",
+                            fontSize = 11.sp,
+                            color = if (state.isIgnoringBatteryOptimizations) Color(0xFF00897B) else Color(0xFFE65100)
+                        )
+                    }
+                    if (!state.isIgnoringBatteryOptimizations) {
+                        TextButton(onClick = onRequestBatteryWhitelist) {
+                            Text("去开启")
+                        }
+                    } else {
+                        Icon(Icons.Default.CheckCircle, contentDescription = null, tint = Color(0xFF00897B))
+                    }
+                }
+
+                if (!state.hasNotificationPermission) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("通知栏显示权限", fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                            Text("开启通知权限可实时查看后台保活与传输进度", fontSize = 11.sp, color = Color(0xFFE65100))
+                        }
+                        TextButton(onClick = onRequestNotificationSettings) {
+                            Text("去授权")
+                        }
+                    }
+                }
+
+                val activeSummary = AppBackgroundKeepAliveManager.formatActiveReasonsSummary(state.activeTaskReasons)
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        text = buildString {
+                            append("守护服务：")
+                            append(if (state.isServiceRunning) "运行中" else "未运行")
+                            append(" · CPU锁：")
+                            append(if (state.isWakeLockHeld) "锁定" else "空闲")
+                            append(" · Wi-Fi锁：")
+                            append(if (state.isWifiLockHeld) "锁定" else "空闲")
+                            if (activeSummary.isNotEmpty()) {
+                                append("\n当前保活任务：$activeSummary")
+                            }
+                        },
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(10.dp)
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("完成")
+            }
+        }
+    )
 }

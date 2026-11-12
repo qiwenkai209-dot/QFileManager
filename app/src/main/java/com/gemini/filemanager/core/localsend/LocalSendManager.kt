@@ -2,6 +2,7 @@ package com.gemini.filemanager.core.localsend
 
 import android.content.Context
 import android.os.Build
+import com.gemini.filemanager.core.background.AppBackgroundKeepAliveManager
 import com.gemini.filemanager.core.file.FileUtils
 import com.gemini.filemanager.data.model.DiscoveredDevice
 import com.gemini.filemanager.data.model.TransferDirection
@@ -22,6 +23,8 @@ object LocalSendManager {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var isInitialized = false
+    @Volatile
+    private var appContext: Context? = null
 
     private val _discoveredDevices = MutableStateFlow<List<DiscoveredDevice>>(emptyList())
     val discoveredDevices = _discoveredDevices.asStateFlow()
@@ -39,8 +42,10 @@ object LocalSendManager {
     fun init(context: Context) {
         if (isInitialized) return
         isInitialized = true
+        val appCtx = context.applicationContext
+        appContext = appCtx
 
-        discovery = LocalSendDiscovery(context, scope) { device ->
+        discovery = LocalSendDiscovery(appCtx, scope) { device ->
             _discoveredDevices.update { list ->
                 val filtered = list.filter { it.device.fingerprint != device.device.fingerprint }
                 filtered + device
@@ -48,7 +53,7 @@ object LocalSendManager {
         }
 
         server = LocalSendServer(
-            context = context,
+            context = appCtx,
             myAlias = myAlias,
             myFingerprint = myFingerprint,
             onReceiveProgress = { fileName, progress, totalBytes ->
@@ -109,27 +114,37 @@ object LocalSendManager {
 
         scope.launch(Dispatchers.IO) {
             val c = client ?: return@launch
-            val success = c.sendFiles(target, files) { fileName, prog, speed ->
-                _transfers.update { list ->
-                    list.map { item ->
-                        if (item.fileName == fileName && item.direction == TransferDirection.SEND) {
-                            item.copy(
-                                progress = prog,
-                                speed = speed,
-                                status = if (prog >= 1.0f) TransferStatus.COMPLETED else TransferStatus.TRANSFERRING
-                            )
-                        } else item
+            val ctx = appContext
+            if (ctx != null) {
+                AppBackgroundKeepAliveManager.acquireLease(ctx, "localsend_send", "LocalSend 发送文件")
+            }
+            try {
+                val success = c.sendFiles(target, files) { fileName, prog, speed ->
+                    _transfers.update { list ->
+                        list.map { item ->
+                            if (item.fileName == fileName && item.direction == TransferDirection.SEND) {
+                                item.copy(
+                                    progress = prog,
+                                    speed = speed,
+                                    status = if (prog >= 1.0f) TransferStatus.COMPLETED else TransferStatus.TRANSFERRING
+                                )
+                            } else item
+                        }
                     }
                 }
-            }
 
-            if (!success) {
-                _transfers.update { list ->
-                    list.map { item ->
-                        if (files.any { it.name == item.fileName } && item.direction == TransferDirection.SEND && item.status != TransferStatus.COMPLETED) {
-                            item.copy(status = TransferStatus.FAILED, errorMessage = "发送中断或对端拒绝")
-                        } else item
+                if (!success) {
+                    _transfers.update { list ->
+                        list.map { item ->
+                            if (files.any { it.name == item.fileName } && item.direction == TransferDirection.SEND && item.status != TransferStatus.COMPLETED) {
+                                item.copy(status = TransferStatus.FAILED, errorMessage = "发送中断或对端拒绝")
+                            } else item
+                        }
                     }
+                }
+            } finally {
+                if (ctx != null) {
+                    AppBackgroundKeepAliveManager.releaseLease(ctx, "localsend_send")
                 }
             }
         }

@@ -3,6 +3,8 @@ package com.gemini.filemanager.ui.screens.home
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.gemini.filemanager.core.background.AppBackgroundKeepAliveManager
+import com.gemini.filemanager.core.background.KeepAliveUiState
 import com.gemini.filemanager.core.file.FileScanner
 import com.gemini.filemanager.core.localsend.LocalSendManager
 import com.gemini.filemanager.core.m3u8.M3U8Scanner
@@ -34,9 +36,22 @@ class HomeViewModel(application: Application) : AndroidViewModel(application) {
     val uiState: StateFlow<HomeUiState> = _uiState.asStateFlow()
 
     val discoveredDevices: StateFlow<List<DiscoveredDevice>> = LocalSendManager.discoveredDevices
+    val keepAliveState: StateFlow<KeepAliveUiState> = AppBackgroundKeepAliveManager.uiState
 
     init {
         loadOverview()
+    }
+
+    fun refreshKeepAliveStatus() {
+        AppBackgroundKeepAliveManager.refreshSystemStates(getApplication())
+    }
+
+    fun setKeepAliveEnabled(enabled: Boolean) {
+        AppBackgroundKeepAliveManager.setKeepAliveEnabled(getApplication(), enabled)
+    }
+
+    fun setStrictWakeLockEnabled(enabled: Boolean) {
+        AppBackgroundKeepAliveManager.setStrictWakeLockEnabled(getApplication(), enabled)
     }
 
     fun refreshSmbCount() {

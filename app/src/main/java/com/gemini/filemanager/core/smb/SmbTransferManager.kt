@@ -2,6 +2,7 @@ package com.gemini.filemanager.core.smb
 
 import android.content.Context
 import android.content.Intent
+import com.gemini.filemanager.core.background.AppBackgroundKeepAliveManager
 import com.gemini.filemanager.data.model.SmbConnectionConfig
 import com.gemini.filemanager.data.model.SmbRemoteFile
 import com.gemini.filemanager.data.model.SmbTransferDirection
@@ -365,6 +366,7 @@ object SmbTransferManager {
     }
 
     private fun ensureServiceStarted(appCtx: Context) {
+        AppBackgroundKeepAliveManager.acquireLease(appCtx, "smb_transfer", "SMB 文件传输")
         if (!serviceRunning) {
             serviceRunning = true
             SmbBackgroundService.startService(appCtx)
@@ -400,11 +402,14 @@ object SmbTransferManager {
         val hasActive = current.any { it.isActive }
         if (!hasActive && serviceRunning) {
             serviceRunning = false
+            AppBackgroundKeepAliveManager.releaseLease(appCtx, "smb_transfer")
             SmbBackgroundService.stopService(appCtx)
             val completedCount = current.count { it.status == SmbTransferStatus.COMPLETED }
             if (completedCount > 0) {
                 SmbBackgroundService.showCompletedNotification(appCtx, "SMB 传输队列已结束（已完成 $completedCount 项）")
             }
+        } else if (!hasActive) {
+            AppBackgroundKeepAliveManager.releaseLease(appCtx, "smb_transfer")
         }
     }
 }

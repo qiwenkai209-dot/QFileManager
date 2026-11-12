@@ -133,9 +133,12 @@ object FileScanner {
 
         for (file in files) {
             if (file.isDirectory) {
-                // 跳过部分无用或者系统隐藏目录
+                // 跳过隐藏目录以及 Android 11+ 受限的系统应用私有目录
                 val name = file.name
-                if (name.startsWith(".") || name == "Android/data" && Build.VERSION.SDK_INT >= 30) {
+                val isRestrictedAndroidSubdir = Build.VERSION.SDK_INT >= 30 &&
+                    dir.name.equals("Android", ignoreCase = true) &&
+                    (name.equals("data", ignoreCase = true) || name.equals("obb", ignoreCase = true))
+                if (name.startsWith(".") || isRestrictedAndroidSubdir) {
                     continue
                 }
                 scanDirRecursively(file, targetExtensions, results, context, category, depth + 1)

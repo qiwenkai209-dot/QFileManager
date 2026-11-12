@@ -1,7 +1,7 @@
 package com.gemini.filemanager.core.m3u8
 
 import android.content.Context
-import android.os.PowerManager
+import com.gemini.filemanager.core.background.AppBackgroundKeepAliveManager
 import com.gemini.filemanager.data.model.M3U8Item
 import com.gemini.filemanager.data.model.M3U8Status
 import kotlinx.coroutines.*
@@ -30,7 +30,6 @@ object M3U8TaskManager {
 
     private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var convertJob: Job? = null
-    private var wakeLock: PowerManager.WakeLock? = null
 
     private val _isConverting = MutableStateFlow(false)
     val isConverting: StateFlow<Boolean> = _isConverting.asStateFlow()
@@ -50,73 +49,74 @@ object M3U8TaskManager {
         deleteSourceAfter: Boolean
     ) {
         if (items.isEmpty()) return
+        val appCtx = context.applicationContext
 
-        // 启动常驻前台服务
-        M3U8BackgroundService.startService(context)
-
-        // 获取 WakeLock，防止手机锁屏后 CPU 休眠导致转码暂停
-        acquireWakeLock(context)
+        // 启动常驻前台服务并申请防休眠唤醒锁租约
+        M3U8BackgroundService.startService(appCtx)
+        AppBackgroundKeepAliveManager.acquireLease(appCtx, "m3u8_convert", "M3U8 后台转码")
 
         convertJob?.cancel()
         convertJob = applicationScope.launch {
-            _isConverting.value = true
-            val totalCount = items.size
+            try {
+                _isConverting.value = true
+                val totalCount = items.size
 
-            for ((index, item) in items.withIndex()) {
-                if (!isActive) break
+                for ((index, item) in items.withIndex()) {
+                    if (!isActive) break
 
-                _currentConvertingItem.value = item
-                _eventFlow.tryEmit(M3U8ConvertEvent.Progress(item.id, 0.05f, "准备中"))
+                    _currentConvertingItem.value = item
+                    _eventFlow.tryEmit(M3U8ConvertEvent.Progress(item.id, 0.05f, "准备中"))
 
-                M3U8BackgroundService.updateNotification(
-                    context = context,
-                    title = "正在后台转码 (${index + 1}/$totalCount)",
-                    content = "${item.title} (5%)",
-                    progress = 5
-                )
+                    M3U8BackgroundService.updateNotification(
+                        context = appCtx,
+                        title = "正在后台转码 (${index + 1}/$totalCount)",
+                        content = "${item.title} (5%)",
+                        progress = 5
+                    )
 
-                M3U8Converter.convertM3U8ToMp4(
-                    context = context,
-                    item = item,
-                    customKeyHex = item.customKeyHex,
-                    listener = object : M3U8Converter.ConvertListener {
-                        override fun onProgress(item: M3U8Item, progress: Float, speed: String, outputSize: Long) {
-                            _eventFlow.tryEmit(M3U8ConvertEvent.Progress(item.id, progress, speed))
-                            val pct = (progress * 100).toInt().coerceIn(0, 100)
-                            val speedText = if (speed.isNotBlank()) " · 速度 $speed" else ""
-                            M3U8BackgroundService.updateNotification(
-                                context = context,
-                                title = "正在后台转码 (${index + 1}/$totalCount)",
-                                content = "${item.title} ($pct%)$speedText",
-                                progress = pct
-                            )
-                        }
-
-                        override fun onSuccess(item: M3U8Item, outputFile: File) {
-                            if (deleteSourceAfter) {
-                                deleteSourceFiles(item)
+                    M3U8Converter.convertM3U8ToMp4(
+                        context = appCtx,
+                        item = item,
+                        customKeyHex = item.customKeyHex,
+                        listener = object : M3U8Converter.ConvertListener {
+                            override fun onProgress(item: M3U8Item, progress: Float, speed: String, outputSize: Long) {
+                                _eventFlow.tryEmit(M3U8ConvertEvent.Progress(item.id, progress, speed))
+                                val pct = (progress * 100).toInt().coerceIn(0, 100)
+                                val speedText = if (speed.isNotBlank()) " · 速度 $speed" else ""
+                                M3U8BackgroundService.updateNotification(
+                                    context = appCtx,
+                                    title = "正在后台转码 (${index + 1}/$totalCount)",
+                                    content = "${item.title} ($pct%)$speedText",
+                                    progress = pct
+                                )
                             }
-                            _eventFlow.tryEmit(M3U8ConvertEvent.Success(item.id, outputFile))
-                        }
 
-                        override fun onError(item: M3U8Item, error: String) {
-                            _eventFlow.tryEmit(M3U8ConvertEvent.Error(item.id, error))
+                            override fun onSuccess(item: M3U8Item, outputFile: File) {
+                                if (deleteSourceAfter) {
+                                    deleteSourceFiles(item)
+                                }
+                                _eventFlow.tryEmit(M3U8ConvertEvent.Success(item.id, outputFile))
+                            }
+
+                            override fun onError(item: M3U8Item, error: String) {
+                                _eventFlow.tryEmit(M3U8ConvertEvent.Error(item.id, error))
+                            }
                         }
-                    }
-                )
+                    )
+                }
+
+                if (isActive) {
+                    M3U8BackgroundService.showCompletedNotification(
+                        context = appCtx,
+                        message = "批量转码已全部完成！共处理 $totalCount 个视频"
+                    )
+                }
+            } finally {
+                _isConverting.value = false
+                _currentConvertingItem.value = null
+                AppBackgroundKeepAliveManager.releaseLease(appCtx, "m3u8_convert")
+                M3U8BackgroundService.stopService(appCtx)
             }
-
-            // 全部处理完成
-            _isConverting.value = false
-            _currentConvertingItem.value = null
-
-            M3U8BackgroundService.showCompletedNotification(
-                context = context,
-                message = "批量转码已全部完成！共处理 $totalCount 个视频"
-            )
-
-            releaseWakeLock()
-            M3U8BackgroundService.stopService(context)
         }
     }
 
@@ -124,11 +124,12 @@ object M3U8TaskManager {
      * 取消当前转码
      */
     fun cancelAll(context: Context) {
+        val appCtx = context.applicationContext
         convertJob?.cancel()
         _isConverting.value = false
         _currentConvertingItem.value = null
-        releaseWakeLock()
-        M3U8BackgroundService.stopService(context)
+        AppBackgroundKeepAliveManager.releaseLease(appCtx, "m3u8_convert")
+        M3U8BackgroundService.stopService(appCtx)
     }
 
     /**
@@ -153,28 +154,5 @@ object M3U8TaskManager {
         } catch (e: Exception) {
             e.printStackTrace()
         }
-    }
-
-    private fun acquireWakeLock(context: Context) {
-        try {
-            if (wakeLock == null) {
-                val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
-                wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "QFileManager:M3U8TranscodeWakeLock").apply {
-                    setReferenceCounted(false)
-                    acquire(60 * 60 * 1000L) // 最长 60 分钟兜底
-                }
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-    }
-
-    private fun releaseWakeLock() {
-        try {
-            if (wakeLock?.isHeld == true) {
-                wakeLock?.release()
-            }
-            wakeLock = null
-        } catch (ignored: Exception) {}
     }
 }

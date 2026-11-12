@@ -7,6 +7,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.provider.OpenableColumns
 import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -24,6 +25,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import com.gemini.filemanager.core.background.AppBackgroundKeepAliveManager
 import com.gemini.filemanager.data.model.FileCategory
 import com.gemini.filemanager.ui.screens.category.CategoryFileListScreen
 import com.gemini.filemanager.ui.screens.cleaner.StorageCleanerScreen
@@ -39,11 +41,18 @@ class MainActivity : ComponentActivity() {
 
     private var hasStoragePermission by mutableStateOf(false)
     private var sharedFilesToTransmit by mutableStateOf<List<File>>(emptyList())
+    private var notificationPromptedThisSession = false
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
-    ) { permissions ->
+    ) { _ ->
         checkStoragePermission()
+    }
+
+    private val notificationPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { _ ->
+        AppBackgroundKeepAliveManager.refreshSystemStates(this)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -51,6 +60,7 @@ class MainActivity : ComponentActivity() {
 
         handleIncomingShareIntent(intent)
         checkStoragePermission()
+        requestNotificationPermissionIfNeeded()
 
         setContent {
             AndroidFileManagerTheme {
@@ -65,9 +75,25 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onStart() {
+        super.onStart()
+        AppBackgroundKeepAliveManager.ensureStartedFromForeground(this)
+    }
+
     override fun onResume() {
         super.onResume()
         checkStoragePermission()
+        AppBackgroundKeepAliveManager.refreshSystemStates(this)
+    }
+
+    private fun requestNotificationPermissionIfNeeded() {
+        if (notificationPromptedThisSession) return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            !AppBackgroundKeepAliveManager.hasNotificationPermission(this)
+        ) {
+            notificationPromptedThisSession = true
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -81,17 +107,56 @@ class MainActivity : ComponentActivity() {
         val type = intent.type
 
         if (Intent.ACTION_SEND == action && type != null) {
+            @Suppress("DEPRECATION")
             val uri = intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
-            uri?.path?.let {
-                sharedFilesToTransmit = listOf(File(it))
+            resolveSharedUriToFile(uri)?.let {
+                sharedFilesToTransmit = listOf(it)
             }
         } else if (Intent.ACTION_SEND_MULTIPLE == action && type != null) {
+            @Suppress("DEPRECATION")
             val uris = intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM)
-            val list = uris?.mapNotNull { it.path?.let { path -> File(path) } } ?: emptyList()
+            val list = uris?.mapNotNull { resolveSharedUriToFile(it) } ?: emptyList()
             if (list.isNotEmpty()) {
                 sharedFilesToTransmit = list
             }
         }
+    }
+
+    private fun resolveSharedUriToFile(uri: Uri?): File? {
+        if (uri == null) return null
+        if ("file".equals(uri.scheme, ignoreCase = true)) {
+            val file = uri.path?.let { File(it) }
+            if (file != null && file.exists() && file.isFile) return file
+        }
+        val pathFile = uri.path?.let { File(it) }
+        if (pathFile != null && pathFile.exists() && pathFile.isFile) return pathFile
+
+        // 兼容来自相册/微信等应用的 content:// 分享 URI
+        if ("content".equals(uri.scheme, ignoreCase = true)) {
+            return try {
+                var displayName = "shared_${System.currentTimeMillis()}"
+                contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
+                    if (cursor.moveToFirst()) {
+                        val idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                        if (idx >= 0) {
+                            cursor.getString(idx)?.takeIf { it.isNotBlank() }?.let { displayName = it }
+                        }
+                    }
+                }
+                val safeName = displayName.replace(Regex("[\\\\/:*?\"<>|]"), "_")
+                val importDir = File(cacheDir, "shared_import").apply { if (!exists()) mkdirs() }
+                val target = File(importDir, safeName)
+                contentResolver.openInputStream(uri)?.use { input ->
+                    target.outputStream().buffered(64 * 1024).use { output ->
+                        input.copyTo(output, 64 * 1024)
+                    }
+                }
+                if (target.exists() && target.length() > 0L) target else null
+            } catch (_: Exception) {
+                null
+            }
+        }
+        return null
     }
 
     private fun checkStoragePermission() {

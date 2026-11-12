@@ -91,15 +91,15 @@ class LocalSendClient(
             .post(RequestBody.create("application/json".toMediaType(), jsonBody))
             .build()
 
-        val resp = try {
-            client.newCall(req).execute()
+        val respBody = try {
+            client.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return@withContext false
+                resp.body?.string() ?: return@withContext false
+            }
         } catch (e: Exception) {
             e.printStackTrace()
             return@withContext false
         }
-
-        if (!resp.isSuccessful) return@withContext false
-        val respBody = resp.body?.string() ?: return@withContext false
         val prepareResp = try {
             json.decodeFromString<PrepareUploadResponseDto>(respBody)
         } catch (e: Exception) {
@@ -113,30 +113,34 @@ class LocalSendClient(
         for ((fileId, token) in prepareResp.files) {
             val file = fileMapById[fileId] ?: continue
             val totalBytes = file.length()
-            var startTime = System.currentTimeMillis()
+            val startTime = System.currentTimeMillis()
 
             val progressBody = object : RequestBody() {
                 override fun contentType() = "application/octet-stream".toMediaType()
                 override fun contentLength() = totalBytes
 
                 override fun writeTo(sink: BufferedSink) {
-                    val source = file.source()
                     var bytesWritten = 0L
+                    var lastProgressAt = 0L
                     val buffer = okio.Buffer()
+                    val chunkSize = 256L * 1024L
 
-                    var read: Long
-                    while (source.read(buffer, 16384L).also { read = it } != -1L) {
-                        sink.write(buffer, read)
-                        bytesWritten += read
+                    file.source().use { source ->
+                        var read: Long
+                        while (source.read(buffer, chunkSize).also { read = it } != -1L) {
+                            sink.write(buffer, read)
+                            bytesWritten += read
 
-                        val elapsedSec = (System.currentTimeMillis() - startTime) / 1000f
-                        val speed = if (elapsedSec > 0) {
-                            val speedBps = (bytesWritten / elapsedSec).toLong()
-                            "${speedBps / 1024 / 1024} MB/s"
-                        } else ""
-
-                        val prog = if (totalBytes > 0) bytesWritten.toFloat() / totalBytes else 0f
-                        onProgress(file.name, prog, speed)
+                            val now = System.currentTimeMillis()
+                            if (now - lastProgressAt >= 150L || bytesWritten >= totalBytes) {
+                                lastProgressAt = now
+                                val elapsedMs = (now - startTime).coerceAtLeast(1L)
+                                val speedBps = (bytesWritten * 1000.0) / elapsedMs
+                                val speed = formatTransferSpeed(speedBps)
+                                val prog = if (totalBytes > 0L) (bytesWritten.toFloat() / totalBytes).coerceIn(0f, 1f) else 1f
+                                onProgress(file.name, prog, speed)
+                            }
+                        }
                     }
                 }
             }
@@ -146,18 +150,26 @@ class LocalSendClient(
                 .post(progressBody)
                 .build()
 
-            val uploadResp = try {
-                client.newCall(uploadReq).execute()
+            val uploadOk = try {
+                client.newCall(uploadReq).execute().use { it.isSuccessful }
             } catch (e: Exception) {
                 e.printStackTrace()
                 return@withContext false
             }
 
-            if (!uploadResp.isSuccessful) {
+            if (!uploadOk) {
                 return@withContext false
             }
         }
 
         true
+    }
+
+    private fun formatTransferSpeed(bytesPerSec: Double): String {
+        return when {
+            bytesPerSec >= 1024.0 * 1024.0 -> String.format(java.util.Locale.US, "%.1f MB/s", bytesPerSec / (1024.0 * 1024.0))
+            bytesPerSec >= 1024.0 -> String.format(java.util.Locale.US, "%.0f KB/s", bytesPerSec / 1024.0)
+            else -> "${bytesPerSec.toLong()} B/s"
+        }
     }
 }

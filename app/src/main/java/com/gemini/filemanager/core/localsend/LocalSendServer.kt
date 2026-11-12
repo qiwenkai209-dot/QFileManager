@@ -4,15 +4,19 @@ import android.content.Context
 import android.media.MediaScannerConnection
 import android.os.Build
 import android.os.Environment
+import com.gemini.filemanager.core.background.AppBackgroundKeepAliveManager
 import com.gemini.filemanager.data.model.FileInfoDto
 import com.gemini.filemanager.data.model.LocalSendDeviceDto
 import com.gemini.filemanager.data.model.PrepareUploadRequestDto
 import com.gemini.filemanager.data.model.PrepareUploadResponseDto
 import fi.iki.elonen.NanoHTTPD
 import kotlinx.serialization.json.Json
+import java.io.BufferedOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 
 class LocalSendServer(
     private val context: Context,
@@ -24,7 +28,8 @@ class LocalSendServer(
 ) : NanoHTTPD(port) {
 
     private val json = Json { ignoreUnknownKeys = true }
-    private val pendingSessions = mutableMapOf<String, Map<String, FileInfoDto>>()
+    private val pendingSessions = ConcurrentHashMap<String, Map<String, FileInfoDto>>()
+    private val activeUploads = AtomicInteger(0)
 
     override fun serve(session: IHTTPSession): Response {
         val uri = session.uri
@@ -88,28 +93,44 @@ class LocalSendServer(
                 targetFile = File(downloadDir, "${base}_${System.currentTimeMillis()}$extStr")
             }
 
+            val tempFile = File(downloadDir, ".${fileName}.${UUID.randomUUID().toString().take(8)}.part")
+            val appCtx = context.applicationContext
+            if (activeUploads.incrementAndGet() == 1) {
+                AppBackgroundKeepAliveManager.acquireLease(appCtx, "localsend_recv", "LocalSend 接收文件")
+            }
+
             return try {
                 val contentLength = session.headers["content-length"]?.toLongOrNull() ?: (fileInfo?.size ?: 0L)
                 val inputStream = session.inputStream
-                val outputStream = FileOutputStream(targetFile)
-
-                val buffer = ByteArray(64 * 1024)
+                val buffer = ByteArray(256 * 1024)
                 var bytesRead: Int
                 var totalRead = 0L
+                var lastUiUpdateAt = 0L
 
-                while (inputStream.read(buffer).also { bytesRead = it } > 0) {
-                    outputStream.write(buffer, 0, bytesRead)
-                    totalRead += bytesRead
-                    if (contentLength > 0) {
-                        onReceiveProgress(targetFile.name, totalRead.toFloat() / contentLength, contentLength)
+                BufferedOutputStream(FileOutputStream(tempFile), 256 * 1024).use { outputStream ->
+                    while (inputStream.read(buffer).also { bytesRead = it } > 0) {
+                        outputStream.write(buffer, 0, bytesRead)
+                        totalRead += bytesRead
+                        if (contentLength > 0L) {
+                            val now = System.currentTimeMillis()
+                            if (now - lastUiUpdateAt >= 150L || totalRead >= contentLength) {
+                                lastUiUpdateAt = now
+                                val prog = (totalRead.toFloat() / contentLength).coerceIn(0f, 1f)
+                                onReceiveProgress(targetFile.name, prog, contentLength)
+                            }
+                        }
                     }
+                    outputStream.flush()
                 }
-                outputStream.flush()
-                outputStream.close()
+
+                if (!tempFile.renameTo(targetFile)) {
+                    tempFile.copyTo(targetFile, overwrite = true)
+                    tempFile.delete()
+                }
 
                 // 通知系统刷新
                 MediaScannerConnection.scanFile(
-                    context,
+                    appCtx,
                     arrayOf(targetFile.absolutePath),
                     null,
                     null
@@ -118,8 +139,16 @@ class LocalSendServer(
 
                 newFixedLengthResponse(Response.Status.OK, "application/json", "{}")
             } catch (e: Exception) {
+                try {
+                    tempFile.delete()
+                } catch (_: Exception) {
+                }
                 e.printStackTrace()
                 newFixedLengthResponse(Response.Status.INTERNAL_ERROR, "text/plain", "Error: ${e.message}")
+            } finally {
+                if (activeUploads.decrementAndGet() <= 0) {
+                    AppBackgroundKeepAliveManager.releaseLease(appCtx, "localsend_recv")
+                }
             }
         }
 

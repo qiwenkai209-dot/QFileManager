@@ -3,6 +3,7 @@ package com.gemini.filemanager.core.file
 import android.content.Context
 import android.os.Environment
 import android.provider.MediaStore
+import com.gemini.filemanager.core.background.AppBackgroundKeepAliveManager
 import com.gemini.filemanager.data.model.DuplicateFileItem
 import com.gemini.filemanager.data.model.DuplicateFilterType
 import com.gemini.filemanager.data.model.DuplicateGroup
@@ -30,56 +31,59 @@ object DuplicateFileScanner {
         filterType: DuplicateFilterType = DuplicateFilterType.ALL,
         callback: ScanCallback? = null
     ): List<DuplicateGroup> = withContext(Dispatchers.IO) {
-        // 阶段 1：收集所有候选物理文件
-        callback?.onProgress("正在扫描手机存储文件...", 0.05f, "")
-        val rawFileList = collectFiles(context, filterType, callback)
-        if (!coroutineContext.isActive) return@withContext emptyList()
-
-        if (rawFileList.isEmpty()) {
-            callback?.onProgress("扫描完成，未发现候选文件", 1f, "")
-            return@withContext emptyList()
-        }
-
-        // 阶段 2：按文件大小分组 (过滤掉单文件大小)
-        callback?.onProgress("正在比对文件大小...", 0.35f, "")
-        val sizeGroupMap = rawFileList
-            .filter { it.size > 0L && it.file.exists() && it.file.canRead() }
-            .groupBy { it.size }
-            .filter { it.value.size >= 2 }
-
-        val sizeCandidateFiles = sizeGroupMap.values.flatten()
-        if (sizeCandidateFiles.isEmpty() || !coroutineContext.isActive) {
-            callback?.onProgress("扫描完成，未发现重复文件", 1f, "")
-            return@withContext emptyList()
-        }
-
-        // 阶段 3：前缀快速指纹过滤 (读取前 8KB 计算快照 Hash)
-        callback?.onProgress("正在进行文件头部快照校验...", 0.55f, "")
-        val partialHashMap = mutableMapOf<String, MutableList<DuplicateFileItem>>()
-        val totalCandidateCount = sizeCandidateFiles.size
-        var processedCount = 0
-
-        for (item in sizeCandidateFiles) {
+        val appCtx = context.applicationContext
+        AppBackgroundKeepAliveManager.acquireLease(appCtx, "duplicate_scan", "重复文件深度筛查")
+        try {
+            // 阶段 1：收集所有候选物理文件
+            callback?.onProgress("正在扫描手机存储文件...", 0.05f, "")
+            val rawFileList = collectFiles(appCtx, filterType, callback)
             if (!coroutineContext.isActive) return@withContext emptyList()
-            processedCount++
-            if (processedCount % 10 == 0 || processedCount == totalCandidateCount) {
-                val p = 0.55f + 0.20f * (processedCount.toFloat() / totalCandidateCount)
-                callback?.onProgress("正在快速校验文件头部指纹 (${processedCount}/$totalCandidateCount)...", p, item.name)
+
+            if (rawFileList.isEmpty()) {
+                callback?.onProgress("扫描完成，未发现候选文件", 1f, "")
+                return@withContext emptyList()
             }
 
-            val partialKey = "${item.size}_${computePartialHash(item.file)}"
-            val list = partialHashMap.getOrPut(partialKey) { mutableListOf() }
-            list.add(item)
-        }
+            // 阶段 2：按文件大小分组 (过滤掉单文件大小)
+            callback?.onProgress("正在比对文件大小...", 0.35f, "")
+            val sizeGroupMap = rawFileList
+                .filter { it.size > 0L && it.file.exists() && it.file.canRead() }
+                .groupBy { it.size }
+                .filter { it.value.size >= 2 }
 
-        // 仅保留头部哈希相同且数量 >= 2 的分组
-        val confirmedCandidates = partialHashMap.values.filter { it.size >= 2 }.flatten()
-        if (confirmedCandidates.isEmpty() || !coroutineContext.isActive) {
-            callback?.onProgress("扫描完成，未发现重复文件", 1f, "")
-            return@withContext emptyList()
-        }
+            val sizeCandidateFiles = sizeGroupMap.values.flatten()
+            if (sizeCandidateFiles.isEmpty() || !coroutineContext.isActive) {
+                callback?.onProgress("扫描完成，未发现重复文件", 1f, "")
+                return@withContext emptyList()
+            }
 
-        // 阶段 4：全量 MD5 确认与分组
+            // 阶段 3：前缀快速指纹过滤 (读取前 8KB 计算快照 Hash)
+            callback?.onProgress("正在进行文件头部快照校验...", 0.55f, "")
+            val partialHashMap = mutableMapOf<String, MutableList<DuplicateFileItem>>()
+            val totalCandidateCount = sizeCandidateFiles.size
+            var processedCount = 0
+
+            for (item in sizeCandidateFiles) {
+                if (!coroutineContext.isActive) return@withContext emptyList()
+                processedCount++
+                if (processedCount % 10 == 0 || processedCount == totalCandidateCount) {
+                    val p = 0.55f + 0.20f * (processedCount.toFloat() / totalCandidateCount)
+                    callback?.onProgress("正在快速校验文件头部指纹 (${processedCount}/$totalCandidateCount)...", p, item.name)
+                }
+
+                val partialKey = "${item.size}_${computePartialHash(item.file)}"
+                val list = partialHashMap.getOrPut(partialKey) { mutableListOf() }
+                list.add(item)
+            }
+
+            // 仅保留头部哈希相同且数量 >= 2 的分组
+            val confirmedCandidates = partialHashMap.values.filter { it.size >= 2 }.flatten()
+            if (confirmedCandidates.isEmpty() || !coroutineContext.isActive) {
+                callback?.onProgress("扫描完成，未发现重复文件", 1f, "")
+                return@withContext emptyList()
+            }
+
+            // 阶段 4：全量 MD5 确认与分组
         callback?.onProgress("正在进行全量 MD5 深度比对...", 0.78f, "")
         val fullHashMap = mutableMapOf<String, MutableList<DuplicateFileItem>>()
         val fullCheckCount = confirmedCandidates.size
@@ -131,6 +135,9 @@ object DuplicateFileScanner {
 
         callback?.onProgress("扫描完成，发现 ${resultGroups.size} 组重复文件", 1f, "")
         resultGroups
+        } finally {
+            AppBackgroundKeepAliveManager.releaseLease(appCtx, "duplicate_scan")
+        }
     }
 
     /**
@@ -340,11 +347,15 @@ object DuplicateFileScanner {
         }
     }
 
+    private val HEX_CHARS = charArrayOf('0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f')
+
     private fun bytesToHex(bytes: ByteArray): String {
-        val sb = StringBuilder()
-        for (b in bytes) {
-            sb.append(String.format("%02x", b))
+        val out = CharArray(bytes.size * 2)
+        for (i in bytes.indices) {
+            val v = bytes[i].toInt() and 0xFF
+            out[i * 2] = HEX_CHARS[v ushr 4]
+            out[i * 2 + 1] = HEX_CHARS[v and 0x0F]
         }
-        return sb.toString()
+        return String(out)
     }
 }

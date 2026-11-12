@@ -11,6 +11,7 @@ import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.DataSourceException
 import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.DefaultDataSource
+import com.gemini.filemanager.core.background.AppBackgroundKeepAliveManager
 import org.codelibs.jcifs.smb.CIFSContext
 import org.codelibs.jcifs.smb.SmbRandomAccess
 import org.codelibs.jcifs.smb.impl.SmbAuthException
@@ -529,6 +530,8 @@ object SmbStreamRegistry {
     }
 
     private val entries = ConcurrentHashMap<String, RegisteredEntry>()
+    @Volatile
+    private var appContext: Context? = null
     private val prefetchCounter = AtomicInteger(1)
     private val prefetchExecutor: ExecutorService = Executors.newFixedThreadPool(3) { runnable ->
         Thread(runnable, "smb-prefetch-${prefetchCounter.getAndIncrement()}").apply {
@@ -549,6 +552,10 @@ object SmbStreamRegistry {
         }, 15, 15, TimeUnit.SECONDS)
     }
 
+    fun attachAppContext(context: Context) {
+        appContext = context.applicationContext
+    }
+
     fun register(target: SmbStreamTarget): String {
         val now = System.currentTimeMillis()
         // 清理过旧或超限的会话
@@ -561,6 +568,7 @@ object SmbStreamRegistry {
         val token = UUID.randomUUID().toString()
         entries[token] = RegisteredEntry(token, target, prefetchExecutor)
         cleanupIdleAndExpired(now)
+        syncKeepAliveLease()
         return token
     }
 
@@ -580,18 +588,33 @@ object SmbStreamRegistry {
 
     fun release(token: String) {
         entries.remove(token)?.release()
+        syncKeepAliveLease()
     }
 
     private fun cleanupIdleAndExpired(nowMs: Long = System.currentTimeMillis()) {
         val iterator = entries.entries.iterator()
+        var removedAny = false
         while (iterator.hasNext()) {
             val entry = iterator.next().value
             if (nowMs - entry.lastTouchedAt >= EXPIRED_SESSION_MS) {
                 iterator.remove()
                 entry.release()
+                removedAny = true
             } else {
                 entry.closeIdleIfNeeded(nowMs)
             }
+        }
+        if (removedAny) {
+            syncKeepAliveLease()
+        }
+    }
+
+    private fun syncKeepAliveLease() {
+        val ctx = appContext ?: return
+        if (entries.isNotEmpty()) {
+            AppBackgroundKeepAliveManager.acquireLease(ctx, "smb_stream", "SMB 在线播放")
+        } else {
+            AppBackgroundKeepAliveManager.releaseLease(ctx, "smb_stream")
         }
     }
 }
