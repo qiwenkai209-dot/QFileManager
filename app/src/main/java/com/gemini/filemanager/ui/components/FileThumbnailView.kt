@@ -392,6 +392,22 @@ fun FileThumbnailView(
                         )
                     }
                 }
+
+                // 音乐试听播放小指示徽标
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(2.dp)
+                        .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(4.dp))
+                        .padding(horizontal = 3.dp, vertical = 1.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.PlayArrow,
+                        contentDescription = "试听播放",
+                        tint = Color(0xFFFF4081),
+                        modifier = Modifier.size(10.dp)
+                    )
+                }
             }
 
             FileCategory.DOCUMENT -> {

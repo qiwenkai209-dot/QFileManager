@@ -1,5 +1,6 @@
 package com.gemini.filemanager.ui.screens.hidden
 
+import android.net.Uri
 import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -11,6 +12,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.OpenInNew
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -27,12 +29,11 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.gemini.filemanager.core.file.FileUtils
 import com.gemini.filemanager.core.file.HiddenFileItem
 import com.gemini.filemanager.data.model.FileCategory
+import com.gemini.filemanager.data.model.FileItem
 import com.gemini.filemanager.ui.components.FileThumbnailView
+import com.gemini.filemanager.ui.components.ImagePreviewDialog
+import com.gemini.filemanager.ui.components.PlayableMediaItem
 import com.gemini.filemanager.ui.components.VideoPlayerDialog
-import coil.compose.AsyncImage
-import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
 import java.io.File
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -47,7 +48,10 @@ fun HiddenFilesScreen(
 
     var playingMediaFile by remember { mutableStateOf<File?>(null) }
     var playingIsAudio by remember { mutableStateOf(false) }
-    var previewingImageFile by remember { mutableStateOf<File?>(null) }
+    var playingQueue by remember { mutableStateOf<List<PlayableMediaItem>>(emptyList()) }
+    var playingQueueIndex by remember { mutableIntStateOf(0) }
+    var previewImageList by remember { mutableStateOf<List<FileItem>>(emptyList()) }
+    var previewImageIndex by remember { mutableIntStateOf(0) }
 
     Scaffold(
         topBar = {
@@ -200,10 +204,27 @@ fun HiddenFilesScreen(
                                 if (state.isSelectionMode) {
                                     viewModel.toggleSelection(item.fileItem.path)
                                 } else if (item.fileItem.category == FileCategory.IMAGE) {
-                                    previewingImageFile = File(item.fileItem.path)
+                                    val allImages = state.filteredItems.filter { it.fileItem.category == FileCategory.IMAGE }.map { it.fileItem }
+                                    val idx = allImages.indexOfFirst { it.path == item.fileItem.path }.coerceAtLeast(0)
+                                    previewImageList = allImages
+                                    previewImageIndex = idx
                                 } else if (item.fileItem.category == FileCategory.VIDEO || item.fileItem.category == FileCategory.AUDIO) {
+                                    val allMedia = state.filteredItems.filter { it.fileItem.category == item.fileItem.category }
+                                    val isAud = (item.fileItem.category == FileCategory.AUDIO)
+                                    val queue = allMedia.map { m ->
+                                        PlayableMediaItem(
+                                            id = m.fileItem.path,
+                                            title = m.fileItem.name,
+                                            fileSizeBytes = m.fileItem.size,
+                                            isAudio = isAud,
+                                            directUri = Uri.fromFile(File(m.fileItem.path))
+                                        )
+                                    }
+                                    val idx = queue.indexOfFirst { it.id == item.fileItem.path }.coerceAtLeast(0)
+                                    playingQueue = queue
+                                    playingQueueIndex = idx
                                     playingMediaFile = File(item.fileItem.path)
-                                    playingIsAudio = (item.fileItem.category == FileCategory.AUDIO)
+                                    playingIsAudio = isAud
                                 } else {
                                     FileUtils.openFile(context, File(item.fileItem.path))
                                 }
@@ -229,76 +250,28 @@ fun HiddenFilesScreen(
         }
     }
 
-    if (previewingImageFile != null) {
-        HiddenImagePreviewDialog(
-            imageFile = previewingImageFile!!,
-            onDismiss = { previewingImageFile = null },
-            onOpenExternally = {
-                FileUtils.openFile(context, previewingImageFile!!)
-            }
+    // 图片全屏画廊预览弹窗
+    if (previewImageList.isNotEmpty()) {
+        ImagePreviewDialog(
+            initialIndex = previewImageIndex,
+            imageList = previewImageList,
+            onDismissRequest = { previewImageList = emptyList() }
         )
     }
 
+    // 视频 / 音乐媒体播放弹窗（支持多选队列列表连续播放、上一首/下一首与进度拖拽）
     if (playingMediaFile != null) {
         VideoPlayerDialog(
-            videoFile = playingMediaFile!!,
-            title = playingMediaFile!!.name,
+            videoFile = playingMediaFile,
+            title = playingMediaFile?.name ?: "媒体播放",
             isAudio = playingIsAudio,
-            onDismissRequest = { playingMediaFile = null }
-        )
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun HiddenImagePreviewDialog(
-    imageFile: File,
-    onDismiss: () -> Unit,
-    onOpenExternally: () -> Unit
-) {
-    Dialog(
-        onDismissRequest = onDismiss,
-        properties = DialogProperties(usePlatformDefaultWidth = false)
-    ) {
-        Surface(
-            modifier = Modifier.fillMaxSize(),
-            color = Color.Black
-        ) {
-            Box(modifier = Modifier.fillMaxSize()) {
-                AsyncImage(
-                    model = imageFile,
-                    contentDescription = imageFile.name,
-                    contentScale = ContentScale.Fit,
-                    modifier = Modifier.fillMaxSize()
-                )
-
-                TopAppBar(
-                    title = {
-                        Text(
-                            text = imageFile.name,
-                            fontSize = 16.sp,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            color = Color.White
-                        )
-                    },
-                    navigationIcon = {
-                        IconButton(onClick = onDismiss) {
-                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回", tint = Color.White)
-                        }
-                    },
-                    actions = {
-                        IconButton(onClick = onOpenExternally) {
-                            Icon(Icons.Default.OpenInNew, contentDescription = "外部应用打开", tint = Color.White)
-                        }
-                    },
-                    colors = TopAppBarDefaults.topAppBarColors(
-                        containerColor = Color.Black.copy(alpha = 0.6f)
-                    ),
-                    modifier = Modifier.align(Alignment.TopCenter)
-                )
+            mediaQueue = playingQueue,
+            initialIndex = playingQueueIndex,
+            onDismissRequest = {
+                playingMediaFile = null
+                playingQueue = emptyList()
             }
-        }
+        )
     }
 }
 

@@ -1,5 +1,6 @@
 package com.gemini.filemanager.ui.screens.category
 
+import android.net.Uri
 import android.widget.Toast
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
@@ -8,6 +9,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import com.gemini.filemanager.ui.components.FileThumbnailView
+import com.gemini.filemanager.ui.components.ImagePreviewDialog
+import com.gemini.filemanager.ui.components.PlayableMediaItem
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -46,6 +49,10 @@ fun CategoryFileListScreen(
     var showDeleteConfirmDialog by remember { mutableStateOf(false) }
     var playingMediaFile by remember { mutableStateOf<File?>(null) }
     var playingIsAudio by remember { mutableStateOf(false) }
+    var playingQueue by remember { mutableStateOf<List<PlayableMediaItem>>(emptyList()) }
+    var playingQueueIndex by remember { mutableIntStateOf(0) }
+    var previewImageList by remember { mutableStateOf<List<FileItem>>(emptyList()) }
+    var previewImageIndex by remember { mutableIntStateOf(0) }
 
     var renamingItem by remember { mutableStateOf<FileItem?>(null) }
     var renameInputText by remember { mutableStateOf("") }
@@ -331,9 +338,28 @@ fun CategoryFileListScreen(
                             onClick = {
                                 if (state.isSelectionMode) {
                                     viewModel.toggleSelection(item.path)
+                                } else if (item.category == FileCategory.IMAGE) {
+                                    val allImages = state.filteredFiles.filter { it.category == FileCategory.IMAGE }
+                                    val idx = allImages.indexOfFirst { it.path == item.path }.coerceAtLeast(0)
+                                    previewImageList = allImages
+                                    previewImageIndex = idx
                                 } else if (item.category == FileCategory.VIDEO || item.category == FileCategory.AUDIO) {
+                                    val allMedia = state.filteredFiles.filter { it.category == item.category }
+                                    val isAud = (item.category == FileCategory.AUDIO)
+                                    val queue = allMedia.map { m ->
+                                        PlayableMediaItem(
+                                            id = m.path,
+                                            title = m.name,
+                                            fileSizeBytes = m.size,
+                                            isAudio = isAud,
+                                            directUri = Uri.fromFile(File(m.path))
+                                        )
+                                    }
+                                    val idx = queue.indexOfFirst { it.id == item.path }.coerceAtLeast(0)
+                                    playingQueue = queue
+                                    playingQueueIndex = idx
                                     playingMediaFile = File(item.path)
-                                    playingIsAudio = (item.category == FileCategory.AUDIO)
+                                    playingIsAudio = isAud
                                 } else {
                                     FileUtils.openFile(context, File(item.path))
                                 }
@@ -391,13 +417,27 @@ fun CategoryFileListScreen(
         )
     }
 
-    // 视频/音频直接播放弹窗（支持全屏和进度拖动）
+    // 图片全屏画廊预览弹窗
+    if (previewImageList.isNotEmpty()) {
+        ImagePreviewDialog(
+            initialIndex = previewImageIndex,
+            imageList = previewImageList,
+            onDismissRequest = { previewImageList = emptyList() }
+        )
+    }
+
+    // 视频/音频直接播放弹窗（支持全屏、完整播放列表队列切歌与进度拖动）
     if (playingMediaFile != null) {
         VideoPlayerDialog(
-            videoFile = playingMediaFile!!,
-            title = playingMediaFile!!.name,
+            videoFile = playingMediaFile,
+            title = playingMediaFile?.name ?: "媒体播放",
             isAudio = playingIsAudio,
-            onDismissRequest = { playingMediaFile = null }
+            mediaQueue = playingQueue,
+            initialIndex = playingQueueIndex,
+            onDismissRequest = {
+                playingMediaFile = null
+                playingQueue = emptyList()
+            }
         )
     }
 

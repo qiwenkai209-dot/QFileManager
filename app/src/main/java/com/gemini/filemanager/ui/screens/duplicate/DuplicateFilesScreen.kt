@@ -32,7 +32,9 @@ import com.gemini.filemanager.data.model.DuplicateFileItem
 import com.gemini.filemanager.data.model.DuplicateFilterType
 import com.gemini.filemanager.data.model.DuplicateGroup
 import com.gemini.filemanager.data.model.FileCategory
+import com.gemini.filemanager.data.model.FileItem
 import com.gemini.filemanager.ui.components.FileThumbnailView
+import com.gemini.filemanager.ui.components.ImagePreviewDialog
 import com.gemini.filemanager.ui.components.VideoPlayerDialog
 import java.io.File
 import java.text.SimpleDateFormat
@@ -51,6 +53,8 @@ fun DuplicateFilesScreen(
     var showDeleteConfirmDialog by remember { mutableStateOf(false) }
     var previewMediaFile by remember { mutableStateOf<File?>(null) }
     var previewIsAudio by remember { mutableStateOf(false) }
+    var previewImageList by remember { mutableStateOf<List<FileItem>>(emptyList()) }
+    var previewImageIndex by remember { mutableIntStateOf(0) }
 
     LaunchedEffect(state.statusMessage) {
         state.statusMessage?.let {
@@ -250,7 +254,23 @@ fun DuplicateFilesScreen(
                                 viewModel.toggleItemSelection(group.hash, path)
                             },
                             onOpenFile = { fileItem ->
-                                if (fileItem.category == FileCategory.VIDEO) {
+                                if (fileItem.category == FileCategory.IMAGE) {
+                                    val allImages = state.groups.flatMap { it.files }
+                                        .filter { it.category == FileCategory.IMAGE }
+                                        .map { f ->
+                                            FileItem(
+                                                path = f.path,
+                                                name = f.name,
+                                                size = f.size,
+                                                lastModified = f.lastModified,
+                                                extension = f.file.extension,
+                                                category = FileCategory.IMAGE
+                                            )
+                                        }
+                                    val idx = allImages.indexOfFirst { it.path == fileItem.path }.coerceAtLeast(0)
+                                    previewImageList = allImages
+                                    previewImageIndex = idx
+                                } else if (fileItem.category == FileCategory.VIDEO) {
                                     previewMediaFile = fileItem.file
                                     previewIsAudio = false
                                 } else if (fileItem.category == FileCategory.AUDIO) {
@@ -298,6 +318,15 @@ fun DuplicateFilesScreen(
                     Text("取消")
                 }
             }
+        )
+    }
+
+    // 图片全屏画廊预览弹窗
+    if (previewImageList.isNotEmpty()) {
+        ImagePreviewDialog(
+            initialIndex = previewImageIndex,
+            imageList = previewImageList,
+            onDismissRequest = { previewImageList = emptyList() }
         )
     }
 
