@@ -1311,14 +1311,18 @@ private fun SmbRemoteBrowserContent(
             }
         }
 
-        // 后台刷新或操作加载时，若列表中已有文件，显示顶部轻量指示条，绝不中断 LazyColumn 挂载
-        if (state.isLoading && state.files.isNotEmpty()) {
-            LinearProgressIndicator(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(2.dp),
-                color = MaterialTheme.colorScheme.primary
-            )
+        // 固定高度槽位（2.dp），彻底防止加载进度条出现/消失引起列表跳动
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(2.dp)
+        ) {
+            if (state.isLoading && state.files.isNotEmpty()) {
+                LinearProgressIndicator(
+                    modifier = Modifier.fillMaxSize(),
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
         }
 
         when {

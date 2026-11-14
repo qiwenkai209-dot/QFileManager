@@ -6,6 +6,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -52,6 +53,8 @@ fun HiddenFilesScreen(
     var playingQueueIndex by remember { mutableIntStateOf(0) }
     var previewImageList by remember { mutableStateOf<List<FileItem>>(emptyList()) }
     var previewImageIndex by remember { mutableIntStateOf(0) }
+    var showBatchDeleteDialog by remember { mutableStateOf(false) }
+    var singleDeleteItem by remember { mutableStateOf<HiddenFileItem?>(null) }
 
     Scaffold(
         topBar = {
@@ -86,6 +89,13 @@ fun HiddenFilesScreen(
                 },
                 actions = {
                     if (state.isSelectionMode) {
+                        IconButton(onClick = { showBatchDeleteDialog = true }) {
+                            Icon(
+                                Icons.Default.Delete,
+                                contentDescription = "删除选中",
+                                tint = MaterialTheme.colorScheme.error
+                            )
+                        }
                         IconButton(onClick = { viewModel.selectAll() }) {
                             Icon(Icons.Default.SelectAll, contentDescription = "全选")
                         }
@@ -98,7 +108,7 @@ fun HiddenFilesScreen(
             )
         },
         bottomBar = {
-            // 底部多选批量恢复栏
+            // 底部多选批量操作栏（支持一键恢复与批量安全删除）
             if (state.isSelectionMode && state.selectedPaths.isNotEmpty()) {
                 Surface(
                     tonalElevation = 8.dp,
@@ -112,21 +122,33 @@ fun HiddenFilesScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "已选 ${state.selectedPaths.size} 个隐藏文件",
+                            text = "已选 ${state.selectedPaths.size} 项",
                             fontSize = 13.sp,
                             fontWeight = FontWeight.Medium
                         )
-                        Button(
-                            onClick = {
-                                viewModel.restoreSelected { count ->
-                                    Toast.makeText(context, "成功恢复 $count 个文件到相册/常规目录！", Toast.LENGTH_LONG).show()
-                                }
-                            },
-                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
-                        ) {
-                            Icon(Icons.Default.Restore, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("一键恢复为常规文件", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedButton(
+                                onClick = { showBatchDeleteDialog = true },
+                                colors = ButtonDefaults.outlinedButtonColors(
+                                    contentColor = MaterialTheme.colorScheme.error
+                                )
+                            ) {
+                                Icon(Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("删除", fontSize = 13.sp)
+                            }
+                            Button(
+                                onClick = {
+                                    viewModel.restoreSelected { count ->
+                                        Toast.makeText(context, "成功恢复 $count 个文件到相册/常规目录！", Toast.LENGTH_LONG).show()
+                                    }
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                            ) {
+                                Icon(Icons.Default.Restore, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("恢复常规", fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                            }
                         }
                     }
                 }
@@ -148,28 +170,35 @@ fun HiddenFilesScreen(
                 )
             }
 
-            // 分类快捷 Filter Chips
-            Row(
+            // 全分类横向滑动 Filter Chips（支持全部、照片、视频、音乐、文档、压缩包、其他）
+            val categoryChips = remember(state.items) {
+                listOf(
+                    null to "全部 (${state.items.size})",
+                    FileCategory.IMAGE to "照片 (${state.items.count { it.fileItem.category == FileCategory.IMAGE }})",
+                    FileCategory.VIDEO to "视频 (${state.items.count { it.fileItem.category == FileCategory.VIDEO }})",
+                    FileCategory.AUDIO to "音乐 (${state.items.count { it.fileItem.category == FileCategory.AUDIO }})",
+                    FileCategory.DOCUMENT to "文档 (${state.items.count { it.fileItem.category == FileCategory.DOCUMENT }})",
+                    FileCategory.ARCHIVE to "压缩包 (${state.items.count { it.fileItem.category == FileCategory.ARCHIVE }})",
+                    FileCategory.APK to "安装包 (${state.items.count { it.fileItem.category == FileCategory.APK }})"
+                ).filter { (cat, _) ->
+                    cat == null || state.items.any { it.fileItem.category == cat }
+                }
+            }
+
+            LazyRow(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 6.dp),
+                    .padding(vertical = 4.dp),
+                contentPadding = PaddingValues(horizontal = 16.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                FilterChip(
-                    selected = state.filterCategory == null,
-                    onClick = { viewModel.setFilterCategory(null) },
-                    label = { Text("全部 (${state.items.size})") }
-                )
-                FilterChip(
-                    selected = state.filterCategory == FileCategory.IMAGE,
-                    onClick = { viewModel.setFilterCategory(FileCategory.IMAGE) },
-                    label = { Text("隐藏照片") }
-                )
-                FilterChip(
-                    selected = state.filterCategory == FileCategory.VIDEO,
-                    onClick = { viewModel.setFilterCategory(FileCategory.VIDEO) },
-                    label = { Text("隐藏视频") }
-                )
+                items(categoryChips, key = { it.first?.name ?: "ALL" }) { (cat, label) ->
+                    FilterChip(
+                        selected = state.filterCategory == cat,
+                        onClick = { viewModel.setFilterCategory(cat) },
+                        label = { Text(label, fontSize = 12.sp) }
+                    )
+                }
             }
 
             if (state.isScanning && state.filteredItems.isEmpty()) {
@@ -242,6 +271,9 @@ fun HiddenFilesScreen(
                                         Toast.makeText(context, "恢复失败，可能目标同名文件已存在", Toast.LENGTH_SHORT).show()
                                     }
                                 }
+                            },
+                            onDeleteClick = {
+                                singleDeleteItem = item
                             }
                         )
                     }
@@ -280,6 +312,65 @@ fun HiddenFilesScreen(
             }
         )
     }
+
+    // 批量删除二次确认弹窗
+    if (showBatchDeleteDialog) {
+        AlertDialog(
+            onDismissRequest = { showBatchDeleteDialog = false },
+            title = { Text("确认删除隐藏文件") },
+            text = { Text("确定要永久删除选中的 ${state.selectedPaths.size} 个隐藏文件吗？此操作无法撤销。") },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showBatchDeleteDialog = false
+                        viewModel.deleteSelected { count ->
+                            Toast.makeText(context, "已删除 $count 个隐藏文件", Toast.LENGTH_SHORT).show()
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                ) {
+                    Text("彻底删除")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showBatchDeleteDialog = false }) {
+                    Text("取消")
+                }
+            }
+        )
+    }
+
+    // 单项删除二次确认弹窗
+    singleDeleteItem?.let { target ->
+        AlertDialog(
+            onDismissRequest = { singleDeleteItem = null },
+            title = { Text("确认删除") },
+            text = { Text("确定要永久删除隐藏文件「${target.fileItem.name}」吗？") },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val toDelete = target
+                        singleDeleteItem = null
+                        viewModel.deleteSingle(toDelete) { success ->
+                            if (success) {
+                                Toast.makeText(context, "已删除该文件", Toast.LENGTH_SHORT).show()
+                            } else {
+                                Toast.makeText(context, "删除失败", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                ) {
+                    Text("彻底删除")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { singleDeleteItem = null }) {
+                    Text("取消")
+                }
+            }
+        )
+    }
 }
 
 @Composable
@@ -289,7 +380,8 @@ fun HiddenFileItemRow(
     isSelectionMode: Boolean,
     onClick: () -> Unit,
     onLongClick: () -> Unit,
-    onRestoreClick: () -> Unit
+    onRestoreClick: () -> Unit,
+    onDeleteClick: () -> Unit
 ) {
     Card(
         modifier = Modifier
@@ -375,14 +467,28 @@ fun HiddenFileItemRow(
             }
 
             if (!isSelectionMode) {
-                FilledTonalButton(
-                    onClick = onRestoreClick,
-                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                    shape = RoundedCornerShape(8.dp)
-                ) {
-                    Icon(Icons.Default.Restore, contentDescription = null, modifier = Modifier.size(14.dp))
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("恢复", fontSize = 12.sp)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(
+                        onClick = onDeleteClick,
+                        modifier = Modifier.size(36.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.DeleteOutline,
+                            contentDescription = "删除",
+                            tint = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(2.dp))
+                    FilledTonalButton(
+                        onClick = onRestoreClick,
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Icon(Icons.Default.Restore, contentDescription = null, modifier = Modifier.size(14.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("恢复", fontSize = 12.sp)
+                    }
                 }
             }
         }

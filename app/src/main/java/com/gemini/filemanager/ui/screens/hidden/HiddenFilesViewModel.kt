@@ -3,6 +3,7 @@ package com.gemini.filemanager.ui.screens.hidden
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.gemini.filemanager.core.file.FileUtils
 import com.gemini.filemanager.core.file.HiddenFileItem
 import com.gemini.filemanager.core.file.HiddenFileManager
 import com.gemini.filemanager.data.model.FileCategory
@@ -190,6 +191,65 @@ class HiddenFilesViewModel(application: Application) : AndroidViewModel(applicat
                         items = newItems,
                         filteredItems = filterItems(newItems, current.filterCategory),
                         restoredCount = current.restoredCount + 1
+                    )
+                }
+            }
+            withContext(Dispatchers.Main) {
+                onComplete(success)
+            }
+        }
+    }
+
+    /**
+     * 批量删除选中的隐藏文件
+     */
+    fun deleteSelected(onComplete: (Int) -> Unit) {
+        val targets = _uiState.value.items.filter { _uiState.value.selectedPaths.contains(it.fileItem.path) }
+        if (targets.isEmpty()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            var count = 0
+            val deletedPaths = mutableSetOf<String>()
+            for (item in targets) {
+                val file = File(item.fileItem.path)
+                if (FileUtils.deleteFileOrDirectory(file)) {
+                    count++
+                    deletedPaths.add(item.fileItem.path)
+                }
+            }
+            _uiState.update { current ->
+                val newItems = current.items.filterNot { deletedPaths.contains(it.fileItem.path) }
+                memoryCache = newItems
+                current.copy(
+                    items = newItems,
+                    filteredItems = filterItems(newItems, current.filterCategory),
+                    selectedPaths = emptySet(),
+                    isSelectionMode = false,
+                    message = "成功删除 $count 个隐藏文件"
+                )
+            }
+            withContext(Dispatchers.Main) {
+                onComplete(count)
+            }
+        }
+    }
+
+    /**
+     * 单项删除隐藏文件
+     */
+    fun deleteSingle(item: HiddenFileItem, onComplete: (Boolean) -> Unit) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val file = File(item.fileItem.path)
+            val success = FileUtils.deleteFileOrDirectory(file)
+            if (success) {
+                _uiState.update { current ->
+                    val newItems = current.items.filterNot { it.fileItem.path == item.fileItem.path }
+                    memoryCache = newItems
+                    val newSelected = current.selectedPaths - item.fileItem.path
+                    current.copy(
+                        items = newItems,
+                        filteredItems = filterItems(newItems, current.filterCategory),
+                        selectedPaths = newSelected,
+                        isSelectionMode = newSelected.isNotEmpty()
                     )
                 }
             }

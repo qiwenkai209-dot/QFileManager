@@ -715,7 +715,7 @@ object SmbClientManager {
     /**
      * 支持断点续传的 SMB 下载：基于 .smbpart 临时文件与 SmbRandomAccess.seek(offset)
      */
-    fun executeResumableDownload(
+    suspend fun executeResumableDownload(
         context: Context,
         config: SmbConnectionConfig,
         task: SmbTransferTask,
@@ -919,7 +919,7 @@ object SmbClientManager {
     /**
      * 支持断点续传的 SMB 上传：本地预读与远端写入双缓冲并行流水线 + .smbpart 原子提交
      */
-    fun executeResumableUpload(
+    suspend fun executeResumableUpload(
         context: Context,
         config: SmbConnectionConfig,
         task: SmbTransferTask,
@@ -1241,7 +1241,7 @@ object SmbClientManager {
      * 3路并发分片预取 + 有序滑动窗口写盘：消除单路 RTT 停等与磁盘 IO 串行等待，
      * 同时保证 .smbpart 文件始终从 startOffset 起严格连续落盘，断点续传 100% 精确。
      */
-    private fun downloadParallelWithWindow(
+    private suspend fun downloadParallelWithWindow(
         ctx: CIFSContext,
         primaryFile: SmbFile,
         remoteUrl: String,
@@ -1251,7 +1251,7 @@ object SmbClientManager {
         isPaused: () -> Boolean,
         isCancelled: () -> Boolean,
         onChunkWritten: (totalBytes: Long, chunkBytes: Int) -> Unit
-    ): PipelineOutcome = runBlocking(Dispatchers.IO) {
+    ): PipelineOutcome = withContext(Dispatchers.IO) {
         val nextDispatchOffset = AtomicLong(startOffset)
         val contiguousWritten = AtomicLong(startOffset)
         val readyChunks = ConcurrentHashMap<Long, ByteArray>()
@@ -1334,13 +1334,13 @@ object SmbClientManager {
                     aborted.set(true)
                     openRafs.forEach { try { it.close() } catch (_: Exception) {} }
                     workerJobs.forEach { it.cancel() }
-                    return@runBlocking PipelineOutcome(written, cancelled = true)
+                    return@withContext PipelineOutcome(written, cancelled = true)
                 }
                 if (isPaused()) {
                     aborted.set(true)
                     openRafs.forEach { try { it.close() } catch (_: Exception) {} }
                     workerJobs.forEach { it.cancel() }
-                    return@runBlocking PipelineOutcome(written, paused = true)
+                    return@withContext PipelineOutcome(written, paused = true)
                 }
 
                 var madeProgress = false
@@ -1348,7 +1348,7 @@ object SmbClientManager {
                     val chunk = readyChunks.remove(written) ?: break
                     if (chunk.isEmpty()) {
                         aborted.set(true)
-                        return@runBlocking PipelineOutcome(written)
+                        return@withContext PipelineOutcome(written)
                     }
                     localRaf.write(chunk)
                     written += chunk.size
@@ -1393,7 +1393,7 @@ object SmbClientManager {
     /**
      * 双缓冲异步预读上传流水线：本地源读取与 SMB 1MB 块发送完全并行，循环池复用内存零 GC。
      */
-    private fun uploadWithBufferedPipeline(
+    private suspend fun uploadWithBufferedPipeline(
         readSource: (ByteArray, Int, Int) -> Int,
         smbRaf: SmbRandomAccess,
         startOffset: Long,
@@ -1401,7 +1401,7 @@ object SmbClientManager {
         isPaused: () -> Boolean,
         isCancelled: () -> Boolean,
         onChunkWritten: (totalBytes: Long, chunkBytes: Int) -> Unit
-    ): PipelineOutcome = runBlocking(Dispatchers.IO) {
+    ): PipelineOutcome = withContext(Dispatchers.IO) {
         val dataChannel = Channel<UploadChunk>(capacity = 3)
         val recycleChannel = Channel<ByteArray>(capacity = 4)
         repeat(4) { recycleChannel.trySend(ByteArray(TRANSFER_BUFFER_SIZE)) }
@@ -1440,11 +1440,11 @@ object SmbClientManager {
             while (totalWritten < totalSize) {
                 if (isCancelled()) {
                     aborted.set(true)
-                    return@runBlocking PipelineOutcome(totalWritten, cancelled = true)
+                    return@withContext PipelineOutcome(totalWritten, cancelled = true)
                 }
                 if (isPaused()) {
                     aborted.set(true)
-                    return@runBlocking PipelineOutcome(totalWritten, paused = true)
+                    return@withContext PipelineOutcome(totalWritten, paused = true)
                 }
 
                 val nextChunk = withTimeoutOrNull(180) {

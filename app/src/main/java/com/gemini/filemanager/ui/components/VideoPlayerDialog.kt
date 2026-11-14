@@ -665,37 +665,18 @@ fun VideoPlayerDialog(
                     // 非全屏顶部栏
                     if (!isFullScreen) {
                         Row(
-                            modifier = Modifier.fillMaxWidth(),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 44.dp),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.SpaceBetween
                         ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Row(
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                ) {
-                                    Text(
-                                        text = if (activeIsAudio) "正在播放音频" else "正在播放视频",
-                                        fontSize = 12.sp,
-                                        color = MaterialTheme.colorScheme.primary,
-                                        fontWeight = FontWeight.SemiBold
-                                    )
-                                    if (speedLabel.isNotEmpty()) {
-                                        Text(
-                                            text = "· $speedLabel",
-                                            fontSize = 11.sp,
-                                            color = Color(0xFF00897B),
-                                            fontWeight = FontWeight.Medium
-                                        )
-                                    }
-                                    if (dynamicQueue.size > 1) {
-                                        Text(
-                                            text = "· ${currentIndex + 1}/${dynamicQueue.size}",
-                                            fontSize = 11.sp,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
-                                    }
-                                }
+                            Column(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .padding(end = 8.dp),
+                                verticalArrangement = Arrangement.Center
+                            ) {
                                 Text(
                                     text = activeTitle,
                                     fontSize = 15.sp,
@@ -703,6 +684,40 @@ fun VideoPlayerDialog(
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.height(18.dp) // 固定高度槽位，彻底防止网速波动导致窗口跳动
+                                ) {
+                                    Text(
+                                        text = if (activeIsAudio) "音频" else "视频",
+                                        fontSize = 11.sp,
+                                        color = MaterialTheme.colorScheme.primary,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                    if (dynamicQueue.size > 1) {
+                                        Text(
+                                            text = " · ${currentIndex + 1}/${dynamicQueue.size}",
+                                            fontSize = 11.sp,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                    if (speedLabel.isNotEmpty()) {
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Surface(
+                                            shape = RoundedCornerShape(3.dp),
+                                            color = Color(0xFF00897B).copy(alpha = 0.14f)
+                                        ) {
+                                            Text(
+                                                text = speedLabel,
+                                                fontSize = 10.sp,
+                                                color = Color(0xFF00897B),
+                                                fontWeight = FontWeight.Bold,
+                                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                            )
+                                        }
+                                    }
+                                }
                             }
 
                             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1502,7 +1517,12 @@ private fun FullScreenOverlayControls(
                 Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "退出全屏", tint = Color.White)
             }
             Spacer(modifier = Modifier.width(8.dp))
-            Column(modifier = Modifier.weight(1f)) {
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(end = 8.dp),
+                verticalArrangement = Arrangement.Center
+            ) {
                 Text(
                     text = title,
                     color = Color.White,
@@ -1511,16 +1531,38 @@ private fun FullScreenOverlayControls(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
-                if (speedLabel.isNotEmpty() || queueSize > 1) {
-                    val info = buildList {
-                        if (queueSize > 1) add("第 ${currentQueueIndex + 1}/$queueSize 集")
-                        if (speedLabel.isNotEmpty()) add("SMB $speedLabel")
-                    }.joinToString(" · ")
-                    Text(
-                        text = info,
-                        color = Color.White.copy(alpha = 0.78f),
-                        fontSize = 11.sp
-                    )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.height(18.dp) // 固定高度槽位，彻底消除全屏下网速加载导致的浮层跳动
+                ) {
+                    if (queueSize > 1) {
+                        Text(
+                            text = "第 ${currentQueueIndex + 1}/$queueSize 集",
+                            color = Color.White.copy(alpha = 0.78f),
+                            fontSize = 11.sp
+                        )
+                        if (speedLabel.isNotEmpty()) {
+                            Text(
+                                text = " · ",
+                                color = Color.White.copy(alpha = 0.6f),
+                                fontSize = 11.sp
+                            )
+                        }
+                    }
+                    if (speedLabel.isNotEmpty()) {
+                        Surface(
+                            shape = RoundedCornerShape(3.dp),
+                            color = Color(0xFF00897B).copy(alpha = 0.35f)
+                        ) {
+                            Text(
+                                text = "SMB $speedLabel",
+                                color = Color.White,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Medium,
+                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                            )
+                        }
+                    }
                 }
             }
 
