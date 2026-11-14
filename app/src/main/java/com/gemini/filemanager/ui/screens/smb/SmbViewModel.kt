@@ -29,12 +29,14 @@ import com.gemini.filemanager.ui.components.PlayableMediaItem
 import com.gemini.filemanager.ui.components.PlayableSubtitleItem
 import com.gemini.filemanager.ui.components.PreparedMediaSource
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.util.Locale
 
@@ -78,6 +80,7 @@ class SmbViewModel(application: Application) : AndroidViewModel(application) {
     val transferTasks: StateFlow<List<SmbTransferTask>> = SmbTransferManager.tasks
 
     private val directoryCache = LruCache<String, List<SmbRemoteFile>>(60)
+    private var previewJob: Job? = null
 
     private var completedUploadIdsSeen = emptySet<String>()
 
@@ -775,7 +778,8 @@ class SmbViewModel(application: Application) : AndroidViewModel(application) {
         onError: (String) -> Unit
     ) {
         val config = _uiState.value.activeConfig ?: return
-        viewModelScope.launch {
+        previewJob?.cancel()
+        previewJob = viewModelScope.launch {
             _uiState.update { it.copy(isPreparingPreview = true, previewProgress = 0f) }
             val result = SmbClientManager.downloadToCacheForPreview(
                 config = config,
@@ -787,7 +791,11 @@ class SmbViewModel(application: Application) : AndroidViewModel(application) {
             )
             _uiState.update { it.copy(isPreparingPreview = false, previewProgress = 0f) }
             result.onSuccess { file -> onReady(file) }
-                .onFailure { err -> onError(err.message ?: "加载文件失败") }
+                .onFailure { err ->
+                    if (err !is kotlinx.coroutines.CancellationException) {
+                        onError(err.message ?: "加载文件失败")
+                    }
+                }
         }
     }
 
@@ -797,15 +805,26 @@ class SmbViewModel(application: Application) : AndroidViewModel(application) {
         onError: (String) -> Unit
     ) {
         val config = _uiState.value.activeConfig ?: return
-        viewModelScope.launch {
+        previewJob?.cancel()
+        previewJob = viewModelScope.launch {
             val result = SmbClientManager.downloadToCacheForPreview(
                 config = config,
                 remoteFile = item,
                 cacheRootDir = getApplication<Application>().cacheDir
             )
             result.onSuccess { file -> onReady(file) }
-                .onFailure { err -> onError(err.message ?: "图片加载失败") }
+                .onFailure { err ->
+                    if (err !is kotlinx.coroutines.CancellationException) {
+                        onError(err.message ?: "图片加载失败")
+                    }
+                }
         }
+    }
+
+    fun cancelPreviewDownload() {
+        previewJob?.cancel()
+        previewJob = null
+        _uiState.update { it.copy(isPreparingPreview = false, previewProgress = 0f) }
     }
 
     fun getCurrentFolderImages(): List<SmbRemoteFile> {
@@ -849,13 +868,15 @@ class SmbViewModel(application: Application) : AndroidViewModel(application) {
                 emptyList()
             }
             val cacheRoot = getApplication<Application>().cacheDir
-            val subtitleItems = matchedSubtitles.mapNotNull { subFile ->
+            val subtitleItems = matchedSubtitles.take(3).mapNotNull { subFile ->
                 val mime = resolveSubtitleMimeType(subFile.name) ?: return@mapNotNull null
-                val cachedResult = SmbClientManager.downloadToCacheForPreview(
-                    config = config,
-                    remoteFile = subFile,
-                    cacheRootDir = cacheRoot
-                )
+                val cachedResult = withTimeoutOrNull(2500L) {
+                    SmbClientManager.downloadToCacheForPreview(
+                        config = config,
+                        remoteFile = subFile,
+                        cacheRootDir = cacheRoot
+                    )
+                } ?: return@mapNotNull null
                 val localSubFile = cachedResult.getOrNull() ?: return@mapNotNull null
                 PlayableSubtitleItem(
                     uri = Uri.fromFile(localSubFile),

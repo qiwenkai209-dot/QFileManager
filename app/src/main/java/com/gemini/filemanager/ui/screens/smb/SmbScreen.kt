@@ -795,7 +795,51 @@ fun SmbScreen(
                     }
                 }
             },
-            onDismiss = { previewGalleryState = null }
+            onDismiss = {
+                previewGalleryState = null
+                viewModel.cancelPreviewDownload()
+            }
+        )
+    }
+
+    // 远程文件打开前下载缓存进度弹窗（支持随时取消，杜绝卡死）
+    if (state.isPreparingPreview) {
+        AlertDialog(
+            onDismissRequest = { viewModel.cancelPreviewDownload() },
+            title = { Text("正在准备文件预览") },
+            text = {
+                Column(
+                    modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    if (state.previewProgress > 0f) {
+                        LinearProgressIndicator(
+                            progress = { state.previewProgress },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "${(state.previewProgress * 100).toInt()}%",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    } else {
+                        CircularProgressIndicator(modifier = Modifier.size(36.dp))
+                        Spacer(modifier = Modifier.height(12.dp))
+                        Text(
+                            text = "正在连接并拉取缓存...",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { viewModel.cancelPreviewDownload() }) {
+                    Text("取消")
+                }
+            }
         )
     }
 }

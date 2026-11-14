@@ -17,6 +17,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Semaphore
@@ -602,13 +603,13 @@ object SmbClientManager {
         cacheRootDir: File,
         onProgress: ((Float) -> Unit)? = null
     ): Result<File> = withContext(Dispatchers.IO) {
+        val previewDir = File(cacheRootDir, "smb_preview")
+        if (!previewDir.exists()) previewDir.mkdirs()
+        val target = File(previewDir, "${remoteFile.smbUrl.hashCode()}_${remoteFile.name}")
+        if (target.exists() && target.length() == remoteFile.size && remoteFile.size > 0L) {
+            return@withContext Result.success(target)
+        }
         try {
-            val previewDir = File(cacheRootDir, "smb_preview")
-            if (!previewDir.exists()) previewDir.mkdirs()
-            val target = File(previewDir, "${remoteFile.smbUrl.hashCode()}_${remoteFile.name}")
-            if (target.exists() && target.length() == remoteFile.size && remoteFile.size > 0L) {
-                return@withContext Result.success(target)
-            }
             val ctx = getContext(config)
             val smbFile = SmbFile(remoteFile.smbUrl, ctx)
             try {
@@ -619,6 +620,7 @@ object SmbClientManager {
                         var read: Int
                         var copied = 0L
                         while (input.read(buf).also { read = it } > 0) {
+                            ensureActive()
                             output.write(buf, 0, read)
                             copied += read
                             if (total > 0L) {
@@ -633,6 +635,8 @@ object SmbClientManager {
                 try { smbFile.close() } catch (_: Exception) {}
             }
         } catch (e: Exception) {
+            try { target.delete() } catch (_: Exception) {}
+            if (e is kotlinx.coroutines.CancellationException) throw e
             if (isTransportFailure(e)) invalidateContext(config.id)
             Result.failure(Exception(formatSmbError(config, e), e))
         }

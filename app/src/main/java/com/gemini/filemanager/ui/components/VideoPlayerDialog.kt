@@ -531,18 +531,39 @@ fun VideoPlayerDialog(
         }
     }
 
+    // 异步释放专用后台线程，彻底杜绝主线程在退出播放器时死锁或卡死
+    val playerReleaseExecutor = remember {
+        java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+            Thread(r, "exo-async-release").apply { isDaemon = true }
+        }
+    }
+
     // 资源释放
     DisposableEffect(Unit) {
         onDispose {
             saveCurrentPositionNow()
-            try {
-                exoPlayer.setVideoTextureView(null)
-                exoPlayer.release()
-            } catch (_: Exception) {
-            }
+            // 1. 优先立即释放并关闭 SMB 流会话，强行中断底层正在阻塞的网络读取
             allocatedTokens.forEach { token ->
                 if (!externalOpenedTokens.contains(token)) {
-                    onReleaseMediaToken?.invoke(token)
+                    try {
+                        onReleaseMediaToken?.invoke(token)
+                    } catch (_: Exception) {
+                    }
+                }
+            }
+            // 2. 主线程零等待脱离视图并停止播放
+            val playerToRelease = exoPlayer
+            try {
+                playerToRelease.stop()
+                playerToRelease.clearMediaItems()
+                playerToRelease.setVideoTextureView(null)
+            } catch (_: Exception) {
+            }
+            // 3. 异步提交 release 到守护线程，主线程毫秒级秒退，绝不卡死
+            playerReleaseExecutor.execute {
+                try {
+                    playerToRelease.release()
+                } catch (_: Exception) {
                 }
             }
             if (activity != null) {

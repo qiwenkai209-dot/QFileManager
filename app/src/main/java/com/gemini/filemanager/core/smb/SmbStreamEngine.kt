@@ -27,6 +27,7 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
@@ -103,7 +104,9 @@ internal class JcifsSmbChunkSource(
 ) : SmbChunkSource {
 
     private val ioLock = Any()
+    @Volatile
     private var smbFile: SmbFile? = null
+    @Volatile
     private var raf: SmbRandomAccess? = null
     private var cursorOffset: Long = -1L
     @Volatile
@@ -183,9 +186,17 @@ internal class JcifsSmbChunkSource(
 
     override fun close() {
         closed = true
-        synchronized(ioLock) {
-            closeHandlesLocked()
+        // 关键死锁修复：绝不在此处死等 ioLock！直接快速关闭底层句柄以中断可能阻塞在网络 IO 的线程
+        try {
+            raf?.close()
+        } catch (_: Exception) {
         }
+        try {
+            smbFile?.close()
+        } catch (_: Exception) {
+        }
+        raf = null
+        smbFile = null
     }
 
     private fun ensureOpenLocked(): SmbFile {
@@ -379,7 +390,10 @@ internal class SmbBufferedStreamSession(
 
     private fun awaitFuture(future: CompletableFuture<ByteArray>): ByteArray {
         return try {
-            future.get()
+            future.get(8, TimeUnit.SECONDS)
+        } catch (e: TimeoutException) {
+            future.cancel(true)
+            throw IOException("SMB 分块读取超时 (8秒服务端无响应)", e)
         } catch (e: ExecutionException) {
             val cause = e.cause
             when (cause) {
@@ -587,8 +601,14 @@ object SmbStreamRegistry {
     }
 
     fun release(token: String) {
-        entries.remove(token)?.release()
+        val entry = entries.remove(token) ?: return
         syncKeepAliveLease()
+        prefetchExecutor.execute {
+            try {
+                entry.release()
+            } catch (_: Exception) {
+            }
+        }
     }
 
     private fun cleanupIdleAndExpired(nowMs: Long = System.currentTimeMillis()) {
