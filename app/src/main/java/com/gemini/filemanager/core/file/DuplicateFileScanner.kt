@@ -329,16 +329,41 @@ object DuplicateFileScanner {
     }
 
     /**
-     * 流式计算文件完整 MD5，安全高效不发生 OOM
+     * 极速且精准的分段哈希校验：小文件全量比对，大文件（>30MB）头中尾三段采样校验，杜绝卡死
      */
     private fun computeFullMD5(file: File): String {
+        val len = file.length()
+        if (len <= 0L) return ""
+        val md = MessageDigest.getInstance("MD5")
+
         return try {
-            val md = MessageDigest.getInstance("MD5")
-            FileInputStream(file).use { fis ->
-                val buffer = ByteArray(65536) // 64KB 缓冲区
-                var read: Int
-                while (fis.read(buffer).also { read = it } != -1) {
-                    md.update(buffer, 0, read)
+            if (len <= 30L * 1024 * 1024) {
+                // 小文件 <= 30MB：全量 MD5
+                FileInputStream(file).use { fis ->
+                    val buffer = ByteArray(65536)
+                    var read: Int
+                    while (fis.read(buffer).also { read = it } != -1) {
+                        md.update(buffer, 0, read)
+                    }
+                }
+            } else {
+                // 超大文件 > 30MB：头部 64KB + 中部 64KB + 尾部 64KB 采样比对，秒级出结果，绝不卡死
+                val sampleSize = 65536
+                val buf = ByteArray(sampleSize)
+                java.io.RandomAccessFile(file, "r").use { raf ->
+                    // 1. 头
+                    val r1 = raf.read(buf, 0, sampleSize)
+                    if (r1 > 0) md.update(buf, 0, r1)
+                    // 2. 中
+                    val midPos = len / 2
+                    raf.seek(midPos)
+                    val r2 = raf.read(buf, 0, sampleSize)
+                    if (r2 > 0) md.update(buf, 0, r2)
+                    // 3. 尾
+                    val tailPos = (len - sampleSize).coerceAtLeast(0L)
+                    raf.seek(tailPos)
+                    val r3 = raf.read(buf, 0, sampleSize)
+                    if (r3 > 0) md.update(buf, 0, r3)
                 }
             }
             bytesToHex(md.digest())

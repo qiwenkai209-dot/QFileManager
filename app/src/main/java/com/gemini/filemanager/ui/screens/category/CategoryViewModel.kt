@@ -8,12 +8,16 @@ import com.gemini.filemanager.core.file.FileScanner
 import com.gemini.filemanager.core.file.FileUtils
 import com.gemini.filemanager.data.model.FileCategory
 import com.gemini.filemanager.data.model.FileItem
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 
 enum class ClipboardAction {
     COPY,
@@ -35,6 +39,7 @@ data class CategoryUiState(
     val searchQuery: String = "",
     val sortOption: SortOption = SortOption.TIME_DESC,
     val isLoading: Boolean = false,
+    val isRefreshing: Boolean = false,
     val isSelectionMode: Boolean = false,
     val selectedFilePaths: Set<String> = emptySet(),
     val clipboardAction: ClipboardAction? = null,
@@ -43,6 +48,11 @@ data class CategoryUiState(
 
 class CategoryViewModel(application: Application) : AndroidViewModel(application) {
 
+    companion object {
+        // 全局分类内存缓存：实现打开文件夹起始就秒显刚加载的内容
+        private val categoryCache = ConcurrentHashMap<FileCategory, List<FileItem>>()
+    }
+
     private val _uiState = MutableStateFlow(CategoryUiState())
     val uiState: StateFlow<CategoryUiState> = _uiState.asStateFlow()
 
@@ -50,34 +60,86 @@ class CategoryViewModel(application: Application) : AndroidViewModel(application
 
     fun initCategory(category: FileCategory) {
         currentCategory = category
+
+        // 1. 若有缓存，立即秒开显示，杜绝白屏等待
+        val cached = categoryCache[category]
+        if (!cached.isNullOrEmpty()) {
+            val sorted = applyFilterAndSort(cached, _uiState.value.searchQuery, _uiState.value.sortOption)
+            _uiState.update {
+                it.copy(
+                    files = cached,
+                    filteredFiles = sorted,
+                    isLoading = false,
+                    isRefreshing = true
+                )
+            }
+        } else {
+            _uiState.update { it.copy(isLoading = true, isRefreshing = false) }
+        }
+
+        // 2. 异步流式增量加载最新内容，加载完再统一刷新
         loadFiles()
     }
 
     fun loadFiles() {
         viewModelScope.launch {
-            _uiState.value = _uiState.value.copy(isLoading = true)
-            val list = FileScanner.scanCategory(getApplication(), currentCategory)
-            val sortedAndFiltered = applyFilterAndSort(list, _uiState.value.searchQuery, _uiState.value.sortOption)
-            _uiState.value = _uiState.value.copy(
-                files = list,
-                filteredFiles = sortedAndFiltered,
-                isLoading = false
-            )
+            val hasExistingData = _uiState.value.files.isNotEmpty()
+            if (!hasExistingData) {
+                _uiState.update { it.copy(isLoading = true) }
+            } else {
+                _uiState.update { it.copy(isRefreshing = true) }
+            }
+
+            try {
+                val fullList = FileScanner.scanCategoryProgressive(
+                    context = getApplication(),
+                    category = currentCategory,
+                    onBatch = { batch ->
+                        // 增量流式更新，打开文件夹时持续呈现刚扫描到的内容
+                        _uiState.update { current ->
+                            val sorted = applyFilterAndSort(batch, current.searchQuery, current.sortOption)
+                            current.copy(
+                                files = batch,
+                                filteredFiles = sorted,
+                                isLoading = false
+                            )
+                        }
+                    }
+                )
+
+                // 写入缓存并全局重排刷新
+                categoryCache[currentCategory] = fullList
+                _uiState.update { current ->
+                    val sorted = applyFilterAndSort(fullList, current.searchQuery, current.sortOption)
+                    current.copy(
+                        files = fullList,
+                        filteredFiles = sorted,
+                        isLoading = false,
+                        isRefreshing = false
+                    )
+                }
+            } catch (e: Exception) {
+                _uiState.update { it.copy(isLoading = false, isRefreshing = false) }
+            }
         }
     }
 
     fun onSearchQueryChange(query: String) {
-        _uiState.value = _uiState.value.copy(
-            searchQuery = query,
-            filteredFiles = applyFilterAndSort(_uiState.value.files, query, _uiState.value.sortOption)
-        )
+        _uiState.update {
+            it.copy(
+                searchQuery = query,
+                filteredFiles = applyFilterAndSort(it.files, query, it.sortOption)
+            )
+        }
     }
 
     fun setSortOption(option: SortOption) {
-        _uiState.value = _uiState.value.copy(
-            sortOption = option,
-            filteredFiles = applyFilterAndSort(_uiState.value.files, _uiState.value.searchQuery, option)
-        )
+        _uiState.update {
+            it.copy(
+                sortOption = option,
+                filteredFiles = applyFilterAndSort(it.files, it.searchQuery, option)
+            )
+        }
     }
 
     private fun applyFilterAndSort(list: List<FileItem>, query: String, sort: SortOption): List<FileItem> {
@@ -104,55 +166,67 @@ class CategoryViewModel(application: Application) : AndroidViewModel(application
         } else {
             currentSet.add(path)
         }
-        _uiState.value = _uiState.value.copy(
-            selectedFilePaths = currentSet,
-            isSelectionMode = currentSet.isNotEmpty()
-        )
+        _uiState.update {
+            it.copy(
+                selectedFilePaths = currentSet,
+                isSelectionMode = currentSet.isNotEmpty()
+            )
+        }
     }
 
     fun selectAll() {
         val allPaths = _uiState.value.filteredFiles.map { it.path }.toSet()
-        _uiState.value = _uiState.value.copy(
-            selectedFilePaths = allPaths,
-            isSelectionMode = true
-        )
+        _uiState.update {
+            it.copy(
+                selectedFilePaths = allPaths,
+                isSelectionMode = true
+            )
+        }
     }
 
     fun clearSelection() {
-        _uiState.value = _uiState.value.copy(
-            selectedFilePaths = emptySet(),
-            isSelectionMode = false
-        )
+        _uiState.update {
+            it.copy(
+                selectedFilePaths = emptySet(),
+                isSelectionMode = false
+            )
+        }
     }
 
     // 复制选中的文件至剪贴板
     fun copySelected() {
         val selected = getSelectedFiles()
-        _uiState.value = _uiState.value.copy(
-            clipboardAction = ClipboardAction.COPY,
-            clipboardFiles = selected,
-            isSelectionMode = false,
-            selectedFilePaths = emptySet()
-        )
+        _uiState.update {
+            it.copy(
+                clipboardAction = ClipboardAction.COPY,
+                clipboardFiles = selected,
+                isSelectionMode = false,
+                selectedFilePaths = emptySet()
+            )
+        }
     }
 
     // 剪切选中的文件至剪贴板
     fun cutSelected() {
         val selected = getSelectedFiles()
-        _uiState.value = _uiState.value.copy(
-            clipboardAction = ClipboardAction.CUT,
-            clipboardFiles = selected,
-            isSelectionMode = false,
-            selectedFilePaths = emptySet()
-        )
+        _uiState.update {
+            it.copy(
+                clipboardAction = ClipboardAction.CUT,
+                clipboardFiles = selected,
+                isSelectionMode = false,
+                selectedFilePaths = emptySet()
+            )
+        }
     }
 
     // 取消剪贴板
     fun clearClipboard() {
-        _uiState.value = _uiState.value.copy(
-            clipboardAction = null,
-            clipboardFiles = emptyList()
-        )
+        _uiState.update {
+            it.copy(
+                clipboardAction = null,
+                clipboardFiles = emptyList()
+            )
+        }
     }
 
     // 粘贴操作（默认粘贴到 Download 目录）
@@ -164,7 +238,7 @@ class CategoryViewModel(application: Application) : AndroidViewModel(application
         val targetDir = customTargetDir ?: Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
         if (!targetDir.exists()) targetDir.mkdirs()
 
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             var successCount = 0
             for (file in files) {
                 if (action == ClipboardAction.COPY) {
@@ -177,30 +251,76 @@ class CategoryViewModel(application: Application) : AndroidViewModel(application
             }
             clearClipboard()
             loadFiles()
-            onComplete(successCount)
+            withContext(Dispatchers.Main) {
+                onComplete(successCount)
+            }
         }
     }
 
     fun deleteSelectedFiles() {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             val paths = _uiState.value.selectedFilePaths
             paths.forEach { path ->
                 FileUtils.deleteFileOrDirectory(File(path))
             }
-            clearSelection()
-            loadFiles()
+
+            // 原地过滤删除项，保持列表滚动位置不跳到最前面
+            _uiState.update { current ->
+                val newFiles = current.files.filterNot { paths.contains(it.path) }
+                val newFiltered = current.filteredFiles.filterNot { paths.contains(it.path) }
+                categoryCache[currentCategory] = newFiles
+                current.copy(
+                    files = newFiles,
+                    filteredFiles = newFiltered,
+                    selectedFilePaths = emptySet(),
+                    isSelectionMode = false
+                )
+            }
         }
     }
 
+    /**
+     * 重命名文件：原地替换列表项，绝对不会清空列表或跳到最前面
+     */
     fun renameFile(path: String, newName: String, onResult: (Boolean) -> Unit) {
-        viewModelScope.launch {
+        viewModelScope.launch(Dispatchers.IO) {
             val file = File(path)
             val result = FileUtils.renameFile(getApplication(), file, newName)
             if (result != null) {
-                loadFiles()
-                onResult(true)
+                // 原地精准更新列表项，保持滚动状态与视图位置，不重置到顶部
+                val newPath = result.absolutePath
+                val newFileName = result.name
+                val newLastModified = result.lastModified()
+                val newExtension = result.extension.lowercase(Locale.ROOT)
+
+                _uiState.update { current ->
+                    val updateItem: (FileItem) -> FileItem = { old ->
+                        if (old.path == path) {
+                            old.copy(
+                                path = newPath,
+                                name = newFileName,
+                                lastModified = newLastModified,
+                                extension = newExtension
+                            )
+                        } else old
+                    }
+                    val newFiles = current.files.map(updateItem)
+                    val newFiltered = current.filteredFiles.map(updateItem)
+                    categoryCache[currentCategory] = newFiles
+
+                    current.copy(
+                        files = newFiles,
+                        filteredFiles = newFiltered
+                    )
+                }
+
+                withContext(Dispatchers.Main) {
+                    onResult(true)
+                }
             } else {
-                onResult(false)
+                withContext(Dispatchers.Main) {
+                    onResult(false)
+                }
             }
         }
     }

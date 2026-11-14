@@ -33,6 +33,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.gemini.filemanager.core.file.FileUtils
+import com.gemini.filemanager.core.file.WeChatDuplicateGroup
+import com.gemini.filemanager.core.file.WeChatFileItem
+import com.gemini.filemanager.ui.components.FileThumbnailView
+import com.gemini.filemanager.ui.screens.cleaner.WeChatCleanerView
 import com.gemini.filemanager.data.model.InstalledAppInfo
 import com.gemini.filemanager.data.model.JunkCategory
 import com.gemini.filemanager.data.model.JunkGroup
@@ -246,6 +250,50 @@ fun StorageCleanerScreen(
                         }
                     }
                 }
+            } else if (state.currentTab == 2 && state.weChatSelectedBytes > 0) {
+                Surface(
+                    tonalElevation = 8.dp,
+                    shadowElevation = 12.dp,
+                    color = MaterialTheme.colorScheme.surface
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .navigationBarsPadding()
+                            .padding(horizontal = 16.dp, vertical = 12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column {
+                            Text(
+                                text = "已勾选 ${state.weChatSelectedPaths.size} 项待清理",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Text(
+                                text = "释放 ${FileUtils.formatFileSize(state.weChatSelectedBytes)} (最晚版已保留)",
+                                fontSize = 14.sp,
+                                color = MaterialTheme.colorScheme.primary,
+                                fontWeight = FontWeight.Bold
+                            )
+                        }
+
+                        Button(
+                            onClick = {
+                                viewModel.cleanSelectedWeChatFiles { freed ->
+                                    Toast.makeText(context, "已清理微信冗余 ${FileUtils.formatFileSize(freed)}！", Toast.LENGTH_SHORT).show()
+                                }
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                            shape = RoundedCornerShape(12.dp),
+                            contentPadding = PaddingValues(horizontal = 20.dp, vertical = 10.dp)
+                        ) {
+                            Icon(Icons.Default.DeleteSweep, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("立即清理微信冗余", fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
             }
         }
     ) { padding ->
@@ -377,6 +425,17 @@ fun StorageCleanerScreen(
                         }
                     }
                 )
+                Tab(
+                    selected = state.currentTab == 2,
+                    onClick = { viewModel.setTab(2) },
+                    text = {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(Icons.Default.ChatBubbleOutline, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("微信精准专清", fontWeight = FontWeight.Bold)
+                        }
+                    }
+                )
             }
 
             // 4. Tab 内容区域
@@ -490,8 +549,9 @@ fun StorageCleanerScreen(
                     }
                 }
 
-            } else {
+            } else if (state.currentTab == 1) {
                 // ========== Tab 1: 全盘垃圾深度清理视图 ==========
+
                 if (state.groups.isEmpty() && !state.isScanning) {
                     EmptyCleanView(onRescan = { viewModel.startScan() })
                 } else {
@@ -533,6 +593,15 @@ fun StorageCleanerScreen(
                         }
                     }
                 }
+            } else {
+                // ========== Tab 2: 微信精准专清视图 (最新算法) ==========
+                WeChatCleanerView(
+                    state = state,
+                    onToggleSelect = { viewModel.toggleWeChatFileSelect(it) },
+                    onSelectAll = { viewModel.selectAllWeChatRedundant() },
+                    onClearAll = { viewModel.clearAllWeChatSelections() },
+                    onRescan = { viewModel.scanWeChat() }
+                )
             }
         }
     }

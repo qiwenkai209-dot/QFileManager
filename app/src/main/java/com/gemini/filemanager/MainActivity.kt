@@ -30,6 +30,7 @@ import com.gemini.filemanager.data.model.FileCategory
 import com.gemini.filemanager.ui.screens.category.CategoryFileListScreen
 import com.gemini.filemanager.ui.screens.cleaner.StorageCleanerScreen
 import com.gemini.filemanager.ui.screens.duplicate.DuplicateFilesScreen
+import com.gemini.filemanager.ui.screens.hidden.HiddenFilesScreen
 import com.gemini.filemanager.ui.screens.home.HomeScreen
 import com.gemini.filemanager.ui.screens.localsend.LocalSendScreen
 import com.gemini.filemanager.ui.screens.m3u8.M3U8ConvertScreen
@@ -252,6 +253,9 @@ fun MainNavigation(initialFiles: List<File> = emptyList()) {
                 },
                 onNavigateCleaner = {
                     navController.navigate("cleaner")
+                },
+                onNavigateHiddenFiles = {
+                    navController.navigate("hidden_files")
                 }
             )
         }
@@ -313,6 +317,12 @@ fun MainNavigation(initialFiles: List<File> = emptyList()) {
 
         composable("cleaner") {
             StorageCleanerScreen(
+                onBack = { navController.popBackStack() }
+            )
+        }
+
+        composable("hidden_files") {
+            HiddenFilesScreen(
                 onBack = { navController.popBackStack() }
             )
         }

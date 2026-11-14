@@ -653,7 +653,7 @@ fun SmbTransferTaskCard(
 
 @Composable
 fun SmbImagePreviewDialog(
-    initialFile: File,
+    initialFile: File?,
     imageItems: List<SmbRemoteFile>,
     initialIndex: Int,
     onLoadImage: (SmbRemoteFile, onLoaded: (File) -> Unit, onError: (String) -> Unit) -> Unit,
@@ -665,12 +665,12 @@ fun SmbImagePreviewDialog(
         mutableIntStateOf(initialIndex.coerceIn(0, (imageItems.size - 1).coerceAtLeast(0)))
     }
     var currentFile by remember(initialFile) { mutableStateOf(initialFile) }
-    var isLoadingNext by remember { mutableStateOf(false) }
+    var isLoadingNext by remember { mutableStateOf(initialFile == null) }
 
     val currentItem = imageItems.getOrNull(currentIndex) ?: return
 
     fun switchTo(targetIdx: Int) {
-        if (targetIdx !in imageItems.indices || isLoadingNext) return
+        if (targetIdx !in imageItems.indices) return
         val nextItem = imageItems[targetIdx]
         isLoadingNext = true
         onLoadImage(
@@ -687,6 +687,12 @@ fun SmbImagePreviewDialog(
         )
     }
 
+    LaunchedEffect(Unit) {
+        if (currentFile == null) {
+            switchTo(currentIndex)
+        }
+    }
+
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false)
@@ -696,21 +702,27 @@ fun SmbImagePreviewDialog(
             color = Color.Black
         ) {
             Box(modifier = Modifier.fillMaxSize()) {
-                AsyncImage(
-                    model = currentFile,
-                    contentDescription = currentItem.name,
-                    contentScale = ContentScale.Fit,
-                    modifier = Modifier.fillMaxSize()
-                )
+                if (currentFile != null) {
+                    AsyncImage(
+                        model = currentFile,
+                        contentDescription = currentItem.name,
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
 
-                if (isLoadingNext) {
+                if (isLoadingNext || currentFile == null) {
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
-                            .background(Color.Black.copy(alpha = 0.4f)),
+                            .background(Color.Black.copy(alpha = 0.5f)),
                         contentAlignment = Alignment.Center
                     ) {
-                        CircularProgressIndicator(color = Color.White)
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            CircularProgressIndicator(color = Color.White)
+                            Spacer(modifier = Modifier.height(12.dp))
+                            Text("正在平滑加载远程高清画面...", color = Color.White, fontSize = 13.sp)
+                        }
                     }
                 }
 
@@ -747,7 +759,10 @@ fun SmbImagePreviewDialog(
                     }) {
                         Icon(Icons.Default.CloudDownload, contentDescription = "下载保存", tint = Color.White)
                     }
-                    IconButton(onClick = { FileUtils.openFile(context, currentFile) }) {
+                    IconButton(
+                        onClick = { currentFile?.let { FileUtils.openFile(context, it) } },
+                        enabled = currentFile != null
+                    ) {
                         Icon(Icons.AutoMirrored.Filled.OpenInNew, contentDescription = "系统查看", tint = Color.White)
                     }
                 }

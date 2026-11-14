@@ -49,7 +49,7 @@ import com.gemini.filemanager.ui.components.VideoPlayerDialog
 import java.io.File
 
 private data class PreviewGalleryState(
-    val initialFile: File,
+    val initialFile: File?,
     val images: List<SmbRemoteFile>,
     val initialIndex: Int
 )
@@ -86,6 +86,10 @@ fun SmbScreen(
     var streamingLaunchState by remember { mutableStateOf<SmbPlayerLaunchState?>(null) }
     var previewGalleryState by remember { mutableStateOf<PreviewGalleryState?>(null) }
 
+    var pendingConfirmUris by remember { mutableStateOf<List<Uri>>(emptyList()) }
+    var showUploadConfirmDialog by remember { mutableStateOf(false) }
+    var showPendingFilesConfirmDialog by remember { mutableStateOf(false) }
+
     LaunchedEffect(initialUploadFiles) {
         if (initialUploadFiles.isNotEmpty()) {
             viewModel.setPendingUploadFiles(initialUploadFiles)
@@ -96,10 +100,8 @@ fun SmbScreen(
         contract = ActivityResultContracts.OpenMultipleDocuments()
     ) { uris: List<Uri> ->
         if (uris.isNotEmpty()) {
-            showTransferDialog = true
-            viewModel.uploadUris(uris) { count ->
-                Toast.makeText(context, "已加入 $count 个上传任务（支持断点续传）", Toast.LENGTH_SHORT).show()
-            }
+            pendingConfirmUris = uris
+            showUploadConfirmDialog = true
         }
     }
 
@@ -379,10 +381,7 @@ fun SmbScreen(
                             if (state.activeConfig != null && !state.isAtServerRoot) {
                                 Button(
                                     onClick = {
-                                        showTransferDialog = true
-                                        viewModel.uploadPendingFiles { count ->
-                                            Toast.makeText(context, "已加入 $count 个上传任务", Toast.LENGTH_SHORT).show()
-                                        }
+                                        showPendingFilesConfirmDialog = true
                                     },
                                     contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
                                 ) {
@@ -472,19 +471,15 @@ fun SmbScreen(
                                 FileCategory.IMAGE -> {
                                     val images = viewModel.getCurrentFolderImages()
                                     val idx = images.indexOfFirst { it.smbUrl == item.smbUrl }.coerceAtLeast(0)
-                                    viewModel.downloadForPreview(
-                                        item = item,
-                                        onReady = { file ->
-                                            previewGalleryState = PreviewGalleryState(
-                                                initialFile = file,
-                                                images = if (images.isEmpty()) listOf(item) else images,
-                                                initialIndex = idx
-                                            )
-                                        },
-                                        onError = { err -> Toast.makeText(context, err, Toast.LENGTH_LONG).show() }
+                                    // 直接拉起沉浸式预览弹窗，内部平滑加载，绝不来回跳出中间遮罩
+                                    previewGalleryState = PreviewGalleryState(
+                                        initialFile = null,
+                                        images = if (images.isEmpty()) listOf(item) else images,
+                                        initialIndex = idx
                                     )
                                 }
                                 else -> {
+                                    Toast.makeText(context, "正在下载远程文件，准备打开...", Toast.LENGTH_SHORT).show()
                                     viewModel.downloadForPreview(
                                         item = item,
                                         onReady = { file -> FileUtils.openFile(context, file) },
@@ -529,25 +524,105 @@ fun SmbScreen(
         }
     }
 
-    // 预览缓存加载遮罩弹窗
-    if (state.isPreparingPreview) {
+    // 上传文件确认对话框（不要打开就直接上传，有个确定按钮）
+    if (showUploadConfirmDialog && pendingConfirmUris.isNotEmpty()) {
         AlertDialog(
-            onDismissRequest = {},
-            title = { Text("正在加载远程文件...", fontSize = 16.sp, fontWeight = FontWeight.Bold) },
+            onDismissRequest = {
+                showUploadConfirmDialog = false
+                pendingConfirmUris = emptyList()
+            },
+            title = { Text("确认上传文件到 SMB", fontWeight = FontWeight.Bold) },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    LinearProgressIndicator(
-                        progress = { state.previewProgress },
-                        modifier = Modifier.fillMaxWidth()
-                    )
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
-                        text = "进度：${(state.previewProgress * 100).toInt()}%",
+                        text = "目标服务器目录：",
                         fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                    Text(
+                        text = state.currentUrl,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "已选择 ${pendingConfirmUris.size} 个文件待上传。确认加入上传队列并后台传输？",
+                        fontSize = 14.sp
+                    )
                 }
             },
-            confirmButton = {}
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val uris = pendingConfirmUris
+                        showUploadConfirmDialog = false
+                        pendingConfirmUris = emptyList()
+                        showTransferDialog = true
+                        viewModel.uploadUris(uris) { count ->
+                            Toast.makeText(context, "已加入 $count 个上传任务（支持断点续传）", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                ) {
+                    Text("确定上传")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        showUploadConfirmDialog = false
+                        pendingConfirmUris = emptyList()
+                    }
+                ) {
+                    Text("取消")
+                }
+            }
+        )
+    }
+
+    // 待上传文件确认对话框
+    if (showPendingFilesConfirmDialog && state.pendingUploadFiles.isNotEmpty()) {
+        AlertDialog(
+            onDismissRequest = { showPendingFilesConfirmDialog = false },
+            title = { Text("确认上传本机文件到 SMB", fontWeight = FontWeight.Bold) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "上传目标目录：",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        text = state.currentUrl,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "共 ${state.pendingUploadFiles.size} 个待上传文件，总大小约 ${FileUtils.formatFileSize(state.pendingUploadFiles.sumOf { it.length() })}。确认现在开始上传？",
+                        fontSize = 14.sp
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showPendingFilesConfirmDialog = false
+                        showTransferDialog = true
+                        viewModel.uploadPendingFiles { count ->
+                            Toast.makeText(context, "已加入 $count 个上传任务", Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                ) {
+                    Text("确定上传")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showPendingFilesConfirmDialog = false }) {
+                    Text("取消")
+                }
+            }
         )
     }
 

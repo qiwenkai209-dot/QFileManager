@@ -6,6 +6,8 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import com.gemini.filemanager.ui.components.FileThumbnailView
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -48,6 +50,7 @@ fun CategoryFileListScreen(
     var renamingItem by remember { mutableStateOf<FileItem?>(null) }
     var renameInputText by remember { mutableStateOf("") }
     var showSortMenu by remember { mutableStateOf(false) }
+    val listState = rememberLazyListState()
 
     LaunchedEffect(category) {
         viewModel.initCategory(category)
@@ -294,7 +297,17 @@ fun CategoryFileListScreen(
                 }
             }
 
-            if (state.isLoading) {
+            // 后台静默刷新/增量嗅探微指示条
+            if (state.isRefreshing) {
+                LinearProgressIndicator(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(2.dp),
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
+
+            if (state.isLoading && state.filteredFiles.isEmpty()) {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     CircularProgressIndicator()
                 }
@@ -304,6 +317,7 @@ fun CategoryFileListScreen(
                 }
             } else {
                 LazyColumn(
+                    state = listState,
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -451,30 +465,14 @@ fun FileListItemView(
                 )
             }
 
-            // 文件类型图标
-            val icon = when (item.category) {
-                FileCategory.IMAGE -> Icons.Default.Image
-                FileCategory.AUDIO -> Icons.Default.Audiotrack
-                FileCategory.VIDEO -> Icons.Default.Movie
-                FileCategory.APK -> Icons.Default.Android
-                FileCategory.ARCHIVE -> Icons.Default.Archive
-                else -> Icons.AutoMirrored.Filled.InsertDriveFile
-            }
-
-            Box(
-                modifier = Modifier
-                    .size(44.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .padding(4.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = icon,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(28.dp)
-                )
-            }
+            // 文件缩略图与多帧轮播预览画面
+            FileThumbnailView(
+                path = item.path,
+                category = item.category,
+                extension = item.extension,
+                size = 46.dp,
+                shape = RoundedCornerShape(10.dp)
+            )
 
             Spacer(modifier = Modifier.width(12.dp))
 

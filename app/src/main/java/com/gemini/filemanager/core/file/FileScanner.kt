@@ -33,20 +33,35 @@ object FileScanner {
         )
     }
 
-    suspend fun scanCategory(context: Context, category: FileCategory): List<FileItem> = withContext(Dispatchers.IO) {
-        val results = mutableListOf<FileItem>()
-        when (category) {
-            FileCategory.IMAGE -> results.addAll(scanMediaStore(context, MediaStore.Images.Media.EXTERNAL_CONTENT_URI, FileCategory.IMAGE))
-            FileCategory.AUDIO -> results.addAll(scanMediaStore(context, MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, FileCategory.AUDIO))
-            FileCategory.VIDEO -> results.addAll(scanMediaStore(context, MediaStore.Video.Media.EXTERNAL_CONTENT_URI, FileCategory.VIDEO))
-            FileCategory.DOCUMENT, FileCategory.APK, FileCategory.ARCHIVE, FileCategory.M3U8 -> {
-                results.addAll(scanFileSystemForCategory(context, category))
-            }
-        }
-        results.sortedByDescending { it.lastModified }
+    suspend fun scanCategory(context: Context, category: FileCategory): List<FileItem> {
+        return scanCategoryProgressive(context, category, null)
     }
 
-    private fun scanMediaStore(context: Context, uri: Uri, category: FileCategory): List<FileItem> {
+    suspend fun scanCategoryProgressive(
+        context: Context,
+        category: FileCategory,
+        onBatch: ((List<FileItem>) -> Unit)? = null
+    ): List<FileItem> = withContext(Dispatchers.IO) {
+        val results = mutableListOf<FileItem>()
+        when (category) {
+            FileCategory.IMAGE -> results.addAll(scanMediaStore(context, MediaStore.Images.Media.EXTERNAL_CONTENT_URI, FileCategory.IMAGE, onBatch))
+            FileCategory.AUDIO -> results.addAll(scanMediaStore(context, MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, FileCategory.AUDIO, onBatch))
+            FileCategory.VIDEO -> results.addAll(scanMediaStore(context, MediaStore.Video.Media.EXTERNAL_CONTENT_URI, FileCategory.VIDEO, onBatch))
+            FileCategory.DOCUMENT, FileCategory.APK, FileCategory.ARCHIVE, FileCategory.M3U8 -> {
+                results.addAll(scanFileSystemForCategory(context, category, onBatch))
+            }
+        }
+        val sorted = results.sortedByDescending { it.lastModified }
+        onBatch?.invoke(sorted)
+        sorted
+    }
+
+    private fun scanMediaStore(
+        context: Context,
+        uri: Uri,
+        category: FileCategory,
+        onBatch: ((List<FileItem>) -> Unit)? = null
+    ): List<FileItem> {
         val list = mutableListOf<FileItem>()
         val projection = arrayOf(
             MediaStore.MediaColumns._ID,
@@ -74,6 +89,7 @@ object FileScanner {
                 val dateCol = it.getColumnIndexOrThrow(MediaStore.MediaColumns.DATE_MODIFIED)
                 val mimeCol = it.getColumnIndexOrThrow(MediaStore.MediaColumns.MIME_TYPE)
 
+                var count = 0
                 while (it.moveToNext()) {
                     val id = it.getLong(idCol)
                     val path = it.getString(dataCol) ?: continue
@@ -97,6 +113,10 @@ object FileScanner {
                             uri = contentUri
                         )
                     )
+                    count++
+                    if (onBatch != null && count % 30 == 0) {
+                        onBatch(list.toList())
+                    }
                 }
             }
         } catch (e: Exception) {
@@ -105,7 +125,11 @@ object FileScanner {
         return list
     }
 
-    private fun scanFileSystemForCategory(context: Context, category: FileCategory): List<FileItem> {
+    private fun scanFileSystemForCategory(
+        context: Context,
+        category: FileCategory,
+        onBatch: ((List<FileItem>) -> Unit)? = null
+    ): List<FileItem> {
         val list = mutableListOf<FileItem>()
         val root = Environment.getExternalStorageDirectory()
         val targetExtensions = when (category) {
@@ -116,7 +140,7 @@ object FileScanner {
             else -> emptySet()
         }
 
-        scanDirRecursively(root, targetExtensions, list, context, category)
+        scanDirRecursively(root, targetExtensions, list, context, category, onBatch = onBatch)
         return list
     }
 
@@ -126,7 +150,8 @@ object FileScanner {
         results: MutableList<FileItem>,
         context: Context,
         category: FileCategory,
-        depth: Int = 0
+        depth: Int = 0,
+        onBatch: ((List<FileItem>) -> Unit)? = null
     ) {
         if (depth > 6) return // 深度保护
         val files = dir.listFiles() ?: return
@@ -141,7 +166,7 @@ object FileScanner {
                 if (name.startsWith(".") || isRestrictedAndroidSubdir) {
                     continue
                 }
-                scanDirRecursively(file, targetExtensions, results, context, category, depth + 1)
+                scanDirRecursively(file, targetExtensions, results, context, category, depth + 1, onBatch)
             } else {
                 val ext = file.extension.lowercase(Locale.ROOT)
                 if (targetExtensions.contains(ext)) {
@@ -170,6 +195,9 @@ object FileScanner {
                             versionName = ver
                         )
                     )
+                    if (onBatch != null && results.size % 25 == 0) {
+                        onBatch(results.toList())
+                    }
                 }
             }
         }

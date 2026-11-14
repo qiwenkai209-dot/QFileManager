@@ -368,6 +368,10 @@ fun M3U8ConvertScreen(
                                 viewModel.deleteSourceFiles(item) {
                                     android.widget.Toast.makeText(context, "已清理源切片，释放存储空间", android.widget.Toast.LENGTH_SHORT).show()
                                 }
+                            },
+                            onRepairAndDeleteSource = {
+                                viewModel.repairAndConvertWithAutoDelete(item)
+                                android.widget.Toast.makeText(context, "已启动修复，生成 MP4 后将直接自动删除切片", android.widget.Toast.LENGTH_SHORT).show()
                             }
                         )
                     }
@@ -471,7 +475,8 @@ fun M3U8TaskCard(
     onEditKey: () -> Unit,
     onRenameTitle: () -> Unit,
     onSend: () -> Unit,
-    onDeleteSource: () -> Unit
+    onDeleteSource: () -> Unit,
+    onRepairAndDeleteSource: () -> Unit
 ) {
     Card(
         modifier = Modifier
@@ -634,6 +639,46 @@ fun M3U8TaskCard(
                     color = MaterialTheme.colorScheme.primary,
                     trackColor = MaterialTheme.colorScheme.surfaceVariant
                 )
+            }
+
+            // 待转换/修复状态操作栏：支持一键“修复并删切片”（转成MP4后直接删除源切片，零二次确认）
+            if (item.status != M3U8Status.COMPLETED && item.status != M3U8Status.CONVERTING) {
+                Spacer(modifier = Modifier.height(10.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    TextButton(
+                        onClick = onPreview,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
+                    ) {
+                        Icon(Icons.Default.PlayCircleOutline, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("试播切片", fontSize = 12.sp)
+                    }
+
+                    Button(
+                        onClick = onRepairAndDeleteSource,
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.errorContainer),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.AutoFixHigh,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onErrorContainer,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "修复并删切片",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                    }
+                }
             }
 
             // 操作栏（完成后提供一键播放和一键LocalSend传出）

@@ -603,10 +603,10 @@ fun VideoPlayerDialog(
             }
         },
         properties = DialogProperties(
-            usePlatformDefaultWidth = !isFullScreen,
-            decorFitsSystemWindows = !isFullScreen,
+            usePlatformDefaultWidth = false,
+            decorFitsSystemWindows = false,
             dismissOnBackPress = true,
-            dismissOnClickOutside = !isFullScreen
+            dismissOnClickOutside = false
         )
     ) {
         val view = LocalView.current

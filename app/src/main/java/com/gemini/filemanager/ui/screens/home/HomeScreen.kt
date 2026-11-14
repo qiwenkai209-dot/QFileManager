@@ -36,6 +36,7 @@ fun HomeScreen(
     onNavigateSmb: () -> Unit,
     onNavigateDuplicate: () -> Unit,
     onNavigateCleaner: () -> Unit,
+    onNavigateHiddenFiles: () -> Unit = {},
     viewModel: HomeViewModel = viewModel()
 ) {
     val state by viewModel.uiState.collectAsState()
@@ -174,11 +175,11 @@ fun HomeScreen(
                 ) {
                     FeatureToolCard(
                         modifier = Modifier.weight(1f),
-                        title = "M3U8转MP4",
-                        subtitle = if (state.cachedM3U8Count > 0) "发现 ${state.cachedM3U8Count} 个离线缓存" else "批量嗅探与秒级合并",
-                        icon = Icons.Default.VideoLibrary,
-                        accentColor = AccentOrange,
-                        onClick = onNavigateM3U8
+                        title = "隐藏文件与私密嗅探",
+                        subtitle = "小米私密相册与.nomedia恢复",
+                        icon = Icons.Default.Visibility,
+                        accentColor = Color(0xFFE91E63),
+                        onClick = onNavigateHiddenFiles
                     )
                     FeatureToolCard(
                         modifier = Modifier.weight(1f),
@@ -189,6 +190,16 @@ fun HomeScreen(
                         onClick = onNavigateLocalSend
                     )
                 }
+            }
+
+            item {
+                FeatureWideCard(
+                    title = "M3U8批量转MP4 (修复并删切片)",
+                    subtitle = if (state.cachedM3U8Count > 0) "发现 ${state.cachedM3U8Count} 个离线缓存 · 支持修复生成MP4后直接删除切片" else "批量嗅探与秒级合并，生成后直删切片",
+                    icon = Icons.Default.VideoLibrary,
+                    accentColor = AccentOrange,
+                    onClick = onNavigateM3U8
+                )
             }
 
             item {

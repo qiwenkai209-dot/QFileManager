@@ -242,6 +242,17 @@ class M3U8ViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
+    /**
+     * 单个条目一键修复并删除切片：生成 MP4 后直接彻底删除源分片，零二次确认
+     */
+    fun repairAndConvertWithAutoDelete(item: M3U8Item) {
+        M3U8TaskManager.startBatchConvert(
+            context = getApplication(),
+            items = listOf(item),
+            deleteSourceAfter = true
+        )
+    }
+
     fun cancelConvert() {
         M3U8TaskManager.cancelAll(getApplication())
     }

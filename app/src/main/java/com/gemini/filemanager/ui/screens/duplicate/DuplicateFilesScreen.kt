@@ -32,6 +32,7 @@ import com.gemini.filemanager.data.model.DuplicateFileItem
 import com.gemini.filemanager.data.model.DuplicateFilterType
 import com.gemini.filemanager.data.model.DuplicateGroup
 import com.gemini.filemanager.data.model.FileCategory
+import com.gemini.filemanager.ui.components.FileThumbnailView
 import com.gemini.filemanager.ui.components.VideoPlayerDialog
 import java.io.File
 import java.text.SimpleDateFormat
@@ -519,6 +520,16 @@ fun DuplicateFileRow(
             checked = item.isSelected,
             onCheckedChange = { onToggle() },
             modifier = Modifier.size(28.dp)
+        )
+
+        Spacer(modifier = Modifier.width(6.dp))
+
+        FileThumbnailView(
+            path = item.path,
+            category = item.category,
+            extension = item.file.extension,
+            size = 38.dp,
+            shape = RoundedCornerShape(6.dp)
         )
 
         Spacer(modifier = Modifier.width(8.dp))
