@@ -65,21 +65,23 @@ class HiddenFilesViewModel(application: Application) : AndroidViewModel(applicat
                 val fullList = HiddenFileManager.scanHiddenFiles(
                     context = getApplication(),
                     onBatch = { batch ->
+                        val distinctBatch = batch.distinctBy { it.fileItem.path }
                         _uiState.update { current ->
                             current.copy(
-                                items = batch,
-                                filteredItems = filterItems(batch, current.filterCategory),
+                                items = distinctBatch,
+                                filteredItems = filterItems(distinctBatch, current.filterCategory),
                                 isScanning = false
                             )
                         }
                     }
                 )
 
-                memoryCache = fullList
+                val distinctFull = fullList.distinctBy { it.fileItem.path }
+                memoryCache = distinctFull
                 _uiState.update { current ->
                     current.copy(
-                        items = fullList,
-                        filteredItems = filterItems(fullList, current.filterCategory),
+                        items = distinctFull,
+                        filteredItems = filterItems(distinctFull, current.filterCategory),
                         isScanning = false,
                         isRefreshing = false
                     )
@@ -100,8 +102,9 @@ class HiddenFilesViewModel(application: Application) : AndroidViewModel(applicat
     }
 
     private fun filterItems(items: List<HiddenFileItem>, category: FileCategory?): List<HiddenFileItem> {
-        if (category == null) return items
-        return items.filter { it.fileItem.category == category }
+        val distinct = items.distinctBy { it.fileItem.path }
+        if (category == null) return distinct
+        return distinct.filter { it.fileItem.category == category }
     }
 
     fun toggleSelection(path: String) {

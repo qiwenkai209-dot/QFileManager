@@ -30,6 +30,7 @@ object HiddenFileManager {
         onBatch: ((List<HiddenFileItem>) -> Unit)? = null
     ): List<HiddenFileItem> = withContext(Dispatchers.IO) {
         val results = mutableListOf<HiddenFileItem>()
+        val visitedPaths = HashSet<String>()
         val root = Environment.getExternalStorageDirectory()
 
         // 1. 重点高频私密/隐藏路径优先扫描（小米 MIUI/HyperOS 私密相册、私密文件夹、微信隐藏媒体等）
@@ -45,29 +46,37 @@ object HiddenFileManager {
             File(root, ".secret")
         ).filter { it.exists() }
 
+        val priorityDirCanonicalPaths = priorityDirs.mapNotNull {
+            try { it.canonicalPath.lowercase(Locale.ROOT) } catch (_: Throwable) { it.absolutePath.lowercase(Locale.ROOT) }
+        }.toSet()
+
         for (pDir in priorityDirs) {
             scanDirectoryInternal(
                 dir = pDir,
                 isInHiddenTree = true,
                 hasNoMediaParent = true,
                 isMiuiSpecial = true,
+                priorityDirCanonicalPaths = emptySet(),
+                visitedPaths = visitedPaths,
                 results = results,
                 onBatch = onBatch
             )
         }
 
-        // 2. 全盘递归扫描隐藏文件（以 . 开头的文件、文件夹以及包含 .nomedia 的隐藏媒体）
+        // 2. 全盘递归扫描隐藏文件（以 . 开头的文件、文件夹以及包含 .nomedia 的隐藏媒体），跳过前面已扫的高优先级目录避免重复
         scanDirectoryInternal(
             dir = root,
             isInHiddenTree = false,
             hasNoMediaParent = false,
             isMiuiSpecial = false,
+            priorityDirCanonicalPaths = priorityDirCanonicalPaths,
+            visitedPaths = visitedPaths,
             results = results,
             onBatch = onBatch,
             depth = 0
         )
 
-        val finalSorted = results.sortedByDescending { it.fileItem.lastModified }
+        val finalSorted = results.distinctBy { it.fileItem.path }.sortedByDescending { it.fileItem.lastModified }
         onBatch?.invoke(finalSorted)
         finalSorted
     }
@@ -77,12 +86,25 @@ object HiddenFileManager {
         isInHiddenTree: Boolean,
         hasNoMediaParent: Boolean,
         isMiuiSpecial: Boolean,
+        priorityDirCanonicalPaths: Set<String>,
+        visitedPaths: MutableSet<String>,
         results: MutableList<HiddenFileItem>,
         onBatch: ((List<HiddenFileItem>) -> Unit)?,
         depth: Int = 0
     ) {
         if (depth > 7) return
-        val files = dir.listFiles() ?: return
+
+        val dirCanonical = try { dir.canonicalPath.lowercase(Locale.ROOT) } catch (_: Throwable) { dir.absolutePath.lowercase(Locale.ROOT) }
+        // 若当前目录在第 1 阶段已作为高优先级目录全量扫描过，则跳过防止重复
+        if (priorityDirCanonicalPaths.isNotEmpty() && priorityDirCanonicalPaths.contains(dirCanonical)) {
+            return
+        }
+
+        val files = try {
+            dir.listFiles()
+        } catch (_: Throwable) {
+            null
+        } ?: return
 
         // 检查当前目录下是否有 .nomedia 文件
         val hasLocalNoMedia = hasNoMediaParent || files.any { it.name.equals(".nomedia", ignoreCase = true) }
@@ -102,6 +124,8 @@ object HiddenFileManager {
                     isInHiddenTree = isHiddenDir,
                     hasNoMediaParent = hasLocalNoMedia,
                     isMiuiSpecial = isMiuiSub,
+                    priorityDirCanonicalPaths = priorityDirCanonicalPaths,
+                    visitedPaths = visitedPaths,
                     results = results,
                     onBatch = onBatch,
                     depth = depth + 1
@@ -111,6 +135,12 @@ object HiddenFileManager {
                 val shouldInclude = isDotFile || isInHiddenTree || hasLocalNoMedia || isMiuiSpecial
 
                 if (shouldInclude && file.length() > 0L) {
+                    val filePathKey = try { file.canonicalPath.lowercase(Locale.ROOT) } catch (_: Throwable) { file.absolutePath.lowercase(Locale.ROOT) }
+                    if (!visitedPaths.add(filePathKey)) {
+                        // 已经访问过该文件（硬链接或重复遍历），跳过
+                        continue
+                    }
+
                     val realExt = detectRealExtension(file)
                     val cat = guessCategoryByExtension(realExt)
 
@@ -131,7 +161,7 @@ object HiddenFileManager {
                     )
 
                     results.add(item)
-                    if (onBatch != null && results.size % 20 == 0) {
+                    if (onBatch != null && results.size % 25 == 0) {
                         onBatch(results.toList())
                     }
                 }
@@ -145,6 +175,9 @@ object HiddenFileManager {
     fun detectRealExtension(file: File): String {
         val originalExt = file.extension.lowercase(Locale.ROOT)
         try {
+            if (!file.exists() || !file.isFile || file.length() < 3L) {
+                return if (originalExt.isNotBlank()) originalExt else "bin"
+            }
             val header = ByteArray(16)
             val bytesRead = FileInputStream(file).use { it.read(header) }
             if (bytesRead >= 3) {

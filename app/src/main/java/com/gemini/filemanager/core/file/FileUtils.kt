@@ -54,26 +54,33 @@ object FileUtils {
     }
 
     fun openFile(context: Context, file: File) {
-        val uri: Uri = FileProvider.getUriForFile(
-            context,
-            "${context.packageName}.fileprovider",
-            file
-        )
-        val mime = getMimeType(file)
-        val intent = Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(uri, mime)
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
         try {
-            context.startActivity(intent)
-        } catch (e: Exception) {
-            e.printStackTrace()
-            // 如果无法直接打开，提示以普通文件打开
-            val chooser = Intent.createChooser(intent, "打开方式").apply {
+            if (!file.exists()) {
+                android.widget.Toast.makeText(context, "文件不存在或已被移动", android.widget.Toast.LENGTH_SHORT).show()
+                return
+            }
+            val uri: Uri = FileProvider.getUriForFile(
+                context,
+                "${context.packageName}.fileprovider",
+                file
+            )
+            val mime = getMimeType(file)
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, mime)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             }
-            context.startActivity(chooser)
+            try {
+                context.startActivity(intent)
+            } catch (e: Exception) {
+                val chooser = Intent.createChooser(intent, "选择打开方式").apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(chooser)
+            }
+        } catch (e: Throwable) {
+            e.printStackTrace()
+            android.widget.Toast.makeText(context, "无法打开该文件: ${e.localizedMessage ?: "未知错误"}", android.widget.Toast.LENGTH_SHORT).show()
         }
     }
 

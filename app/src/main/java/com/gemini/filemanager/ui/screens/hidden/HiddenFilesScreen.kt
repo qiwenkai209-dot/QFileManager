@@ -6,6 +6,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -28,6 +29,10 @@ import com.gemini.filemanager.core.file.HiddenFileItem
 import com.gemini.filemanager.data.model.FileCategory
 import com.gemini.filemanager.ui.components.FileThumbnailView
 import com.gemini.filemanager.ui.components.VideoPlayerDialog
+import coil.compose.AsyncImage
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import java.io.File
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -42,6 +47,7 @@ fun HiddenFilesScreen(
 
     var playingMediaFile by remember { mutableStateOf<File?>(null) }
     var playingIsAudio by remember { mutableStateOf(false) }
+    var previewingImageFile by remember { mutableStateOf<File?>(null) }
 
     Scaffold(
         topBar = {
@@ -181,7 +187,10 @@ fun HiddenFilesScreen(
                     contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    items(state.filteredItems, key = { it.fileItem.path }) { item ->
+                    itemsIndexed(
+                        items = state.filteredItems,
+                        key = { index, item -> "${item.fileItem.path}_$index" }
+                    ) { _, item ->
                         val isSelected = state.selectedPaths.contains(item.fileItem.path)
                         HiddenFileItemRow(
                             item = item,
@@ -190,6 +199,8 @@ fun HiddenFilesScreen(
                             onClick = {
                                 if (state.isSelectionMode) {
                                     viewModel.toggleSelection(item.fileItem.path)
+                                } else if (item.fileItem.category == FileCategory.IMAGE) {
+                                    previewingImageFile = File(item.fileItem.path)
                                 } else if (item.fileItem.category == FileCategory.VIDEO || item.fileItem.category == FileCategory.AUDIO) {
                                     playingMediaFile = File(item.fileItem.path)
                                     playingIsAudio = (item.fileItem.category == FileCategory.AUDIO)
@@ -218,6 +229,16 @@ fun HiddenFilesScreen(
         }
     }
 
+    if (previewingImageFile != null) {
+        HiddenImagePreviewDialog(
+            imageFile = previewingImageFile!!,
+            onDismiss = { previewingImageFile = null },
+            onOpenExternally = {
+                FileUtils.openFile(context, previewingImageFile!!)
+            }
+        )
+    }
+
     if (playingMediaFile != null) {
         VideoPlayerDialog(
             videoFile = playingMediaFile!!,
@@ -225,6 +246,59 @@ fun HiddenFilesScreen(
             isAudio = playingIsAudio,
             onDismissRequest = { playingMediaFile = null }
         )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun HiddenImagePreviewDialog(
+    imageFile: File,
+    onDismiss: () -> Unit,
+    onOpenExternally: () -> Unit
+) {
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Surface(
+            modifier = Modifier.fillMaxSize(),
+            color = Color.Black
+        ) {
+            Box(modifier = Modifier.fillMaxSize()) {
+                AsyncImage(
+                    model = imageFile,
+                    contentDescription = imageFile.name,
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.fillMaxSize()
+                )
+
+                TopAppBar(
+                    title = {
+                        Text(
+                            text = imageFile.name,
+                            fontSize = 16.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            color = Color.White
+                        )
+                    },
+                    navigationIcon = {
+                        IconButton(onClick = onDismiss) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "返回", tint = Color.White)
+                        }
+                    },
+                    actions = {
+                        IconButton(onClick = onOpenExternally) {
+                            Icon(Icons.Default.OpenInNew, contentDescription = "外部应用打开", tint = Color.White)
+                        }
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = Color.Black.copy(alpha = 0.6f)
+                    ),
+                    modifier = Modifier.align(Alignment.TopCenter)
+                )
+            }
+        }
     }
 }
 
