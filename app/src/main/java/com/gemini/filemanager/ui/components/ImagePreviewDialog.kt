@@ -242,8 +242,9 @@ fun ImagePreviewDialog(
                             }
                             // 顺时针旋转 90 度
                             IconButton(onClick = { rotationAngle = (rotationAngle + 90f) % 360f }) {
+                                @Suppress("DEPRECATION")
                                 Icon(
-                                    imageVector = Icons.AutoMirrored.Filled.RotateRight,
+                                    imageVector = Icons.Default.RotateRight,
                                     contentDescription = "旋转图片",
                                     tint = Color.White
                                 )
