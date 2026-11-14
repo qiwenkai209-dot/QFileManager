@@ -658,20 +658,23 @@ fun SmbImagePreviewDialog(
     initialIndex: Int,
     onLoadImage: (SmbRemoteFile, onLoaded: (File) -> Unit, onError: (String) -> Unit) -> Unit,
     onDownloadToLocal: (SmbRemoteFile) -> Unit,
+    onRenameItem: ((SmbRemoteFile, String) -> Unit)? = null,
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
-    var currentIndex by remember(initialIndex) {
-        mutableIntStateOf(initialIndex.coerceIn(0, (imageItems.size - 1).coerceAtLeast(0)))
+    var dynamicItems by remember(imageItems) { mutableStateOf(imageItems) }
+    var currentIndex by remember(initialIndex, dynamicItems) {
+        mutableIntStateOf(initialIndex.coerceIn(0, (dynamicItems.size - 1).coerceAtLeast(0)))
     }
     var currentFile by remember(initialFile) { mutableStateOf(initialFile) }
     var isLoadingNext by remember { mutableStateOf(initialFile == null) }
+    var showRenameDialog by remember { mutableStateOf(false) }
 
-    val currentItem = imageItems.getOrNull(currentIndex) ?: return
+    val currentItem = dynamicItems.getOrNull(currentIndex) ?: return
 
     fun switchTo(targetIdx: Int) {
-        if (targetIdx !in imageItems.indices) return
-        val nextItem = imageItems[targetIdx]
+        if (targetIdx !in dynamicItems.indices) return
+        val nextItem = dynamicItems[targetIdx]
         isLoadingNext = true
         onLoadImage(
             nextItem,
@@ -753,6 +756,11 @@ fun SmbImagePreviewDialog(
                             fontSize = 11.sp
                         )
                     }
+                    if (onRenameItem != null) {
+                        IconButton(onClick = { showRenameDialog = true }) {
+                            Icon(Icons.Default.Edit, contentDescription = "重命名", tint = Color.White)
+                        }
+                    }
                     IconButton(onClick = {
                         onDownloadToLocal(currentItem)
                         Toast.makeText(context, "已加入下载队列 (Download/SMB)", Toast.LENGTH_SHORT).show()
@@ -798,6 +806,28 @@ fun SmbImagePreviewDialog(
                 }
             }
         }
+    }
+
+    if (showRenameDialog) {
+        SimpleInputDialog(
+            title = "重命名远程图片",
+            label = "新文件名",
+            initialValue = currentItem.name,
+            confirmText = "确定",
+            onDismiss = { showRenameDialog = false },
+            onConfirm = { newName ->
+                showRenameDialog = false
+                val trimmed = newName.trim()
+                if (trimmed.isNotBlank() && trimmed != currentItem.name) {
+                    val updated = currentItem.copy(name = trimmed)
+                    val updatedList = dynamicItems.toMutableList()
+                    updatedList[currentIndex] = updated
+                    dynamicItems = updatedList
+                    onRenameItem?.invoke(currentItem, trimmed)
+                    Toast.makeText(context, "已更新文件名", Toast.LENGTH_SHORT).show()
+                }
+            }
+        )
     }
 }
 

@@ -52,7 +52,8 @@ fun ImagePreviewDialog(
     initialIndex: Int = 0,
     imageList: List<FileItem>,
     onDismissRequest: () -> Unit,
-    onDeleteCurrent: ((FileItem) -> Unit)? = null
+    onDeleteCurrent: ((FileItem) -> Unit)? = null,
+    onRenameSuccess: ((oldItem: FileItem, newItem: FileItem) -> Unit)? = null
 ) {
     if (imageList.isEmpty()) {
         onDismissRequest()
@@ -60,17 +61,20 @@ fun ImagePreviewDialog(
     }
 
     val context = LocalContext.current
-    var currentIndex by remember(initialIndex, imageList) {
-        mutableIntStateOf(initialIndex.coerceIn(0, (imageList.size - 1).coerceAtLeast(0)))
+    var dynamicList by remember(imageList) { mutableStateOf(imageList) }
+    var currentIndex by remember(initialIndex, dynamicList) {
+        mutableIntStateOf(initialIndex.coerceIn(0, (dynamicList.size - 1).coerceAtLeast(0)))
     }
 
-    val currentItem = imageList.getOrNull(currentIndex) ?: return
+    val currentItem = dynamicList.getOrNull(currentIndex) ?: return
     val currentFile = remember(currentItem.path) { File(currentItem.path) }
 
     var scale by remember(currentIndex) { mutableFloatStateOf(1f) }
     var offset by remember(currentIndex) { mutableStateOf(Offset.Zero) }
     var rotationAngle by remember(currentIndex) { mutableFloatStateOf(0f) }
     var showControls by remember { mutableStateOf(true) }
+    var showRenameDialog by remember { mutableStateOf(false) }
+    var renameInputText by remember { mutableStateOf("") }
 
     val transformState = rememberTransformableState { zoomChange, offsetChange, _ ->
         val newScale = (scale * zoomChange).coerceIn(0.7f, 6.0f)
@@ -225,10 +229,21 @@ fun ImagePreviewDialog(
                             }
                         },
                         actions = {
+                            // 重命名当前图片
+                            IconButton(onClick = {
+                                renameInputText = currentItem.name
+                                showRenameDialog = true
+                            }) {
+                                Icon(
+                                    imageVector = Icons.Default.Edit,
+                                    contentDescription = "重命名",
+                                    tint = Color.White
+                                )
+                            }
                             // 顺时针旋转 90 度
                             IconButton(onClick = { rotationAngle = (rotationAngle + 90f) % 360f }) {
                                 Icon(
-                                    imageVector = Icons.Default.RotateRight,
+                                    imageVector = Icons.AutoMirrored.Filled.RotateRight,
                                     contentDescription = "旋转图片",
                                     tint = Color.White
                                 )
@@ -295,5 +310,54 @@ fun ImagePreviewDialog(
                 }
             }
         }
+    }
+
+    if (showRenameDialog) {
+        AlertDialog(
+            onDismissRequest = { showRenameDialog = false },
+            title = { Text("重命名图片") },
+            text = {
+                OutlinedTextField(
+                    value = renameInputText,
+                    onValueChange = { renameInputText = it },
+                    label = { Text("新文件名") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val trimmed = renameInputText.trim()
+                        if (trimmed.isNotBlank() && trimmed != currentItem.name) {
+                            val renamed = FileUtils.renameFile(context, currentFile, trimmed)
+                            if (renamed != null) {
+                                val newItem = currentItem.copy(
+                                    path = renamed.absolutePath,
+                                    name = renamed.name,
+                                    lastModified = renamed.lastModified(),
+                                    extension = renamed.extension
+                                )
+                                val updated = dynamicList.toMutableList()
+                                updated[currentIndex] = newItem
+                                dynamicList = updated
+                                onRenameSuccess?.invoke(currentItem, newItem)
+                                Toast.makeText(context, "重命名成功", Toast.LENGTH_SHORT).show()
+                            } else {
+                                Toast.makeText(context, "重命名失败，同名文件可能已存在", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                        showRenameDialog = false
+                    }
+                ) {
+                    Text("确定")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showRenameDialog = false }) {
+                    Text("取消")
+                }
+            }
+        )
     }
 }

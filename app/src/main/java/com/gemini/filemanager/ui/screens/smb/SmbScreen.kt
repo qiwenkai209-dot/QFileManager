@@ -762,6 +762,13 @@ fun SmbScreen(
                 }
             },
             onReleaseMediaToken = { token -> viewModel.releaseStreamToken(token) },
+            onRenameMedia = { mediaItem, newName ->
+                viewModel.renameMediaItem(mediaItem.id, newName) { success, err ->
+                    if (!success && err != null) {
+                        Toast.makeText(context, "重命名失败: $err", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            },
             onDismissRequest = {
                 streamingLaunchState = null
             }
@@ -780,6 +787,13 @@ fun SmbScreen(
             },
             onDownloadToLocal = { imgItem ->
                 viewModel.downloadItems(listOf(imgItem)) { _, _ -> }
+            },
+            onRenameItem = { imgItem, newName ->
+                viewModel.renameItem(imgItem, newName) { success, err ->
+                    if (!success && err != null) {
+                        Toast.makeText(context, "重命名失败: $err", Toast.LENGTH_SHORT).show()
+                    }
+                }
             },
             onDismiss = { previewGalleryState = null }
         )
@@ -1114,6 +1128,7 @@ private fun SmbRemoteBrowserContent(
     onDeleteSingleItem: (SmbRemoteFile) -> Unit
 ) {
     val breadcrumbListState = rememberLazyListState()
+    val fileListState = rememberLazyListState()
     LaunchedEffect(state.breadcrumbs.size) {
         if (state.breadcrumbs.isNotEmpty()) {
             breadcrumbListState.animateScrollToItem(state.breadcrumbs.lastIndex)
@@ -1296,8 +1311,18 @@ private fun SmbRemoteBrowserContent(
             }
         }
 
+        // 后台刷新或操作加载时，若列表中已有文件，显示顶部轻量指示条，绝不中断 LazyColumn 挂载
+        if (state.isLoading && state.files.isNotEmpty()) {
+            LinearProgressIndicator(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(2.dp),
+                color = MaterialTheme.colorScheme.primary
+            )
+        }
+
         when {
-            state.isLoading -> {
+            state.isLoading && state.files.isEmpty() -> {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         CircularProgressIndicator()
@@ -1306,7 +1331,7 @@ private fun SmbRemoteBrowserContent(
                     }
                 }
             }
-            state.errorMessage != null -> {
+            state.errorMessage != null && state.files.isEmpty() -> {
                 Box(modifier = Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
                     Card(
                         shape = RoundedCornerShape(16.dp),
@@ -1354,7 +1379,7 @@ private fun SmbRemoteBrowserContent(
                     }
                 }
             }
-            state.filteredFiles.isEmpty() -> {
+            state.filteredFiles.isEmpty() && !state.isLoading -> {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Text(
@@ -1372,6 +1397,7 @@ private fun SmbRemoteBrowserContent(
             }
             else -> {
                 LazyColumn(
+                    state = fileListState,
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)

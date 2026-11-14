@@ -422,6 +422,9 @@ fun CategoryFileListScreen(
         ImagePreviewDialog(
             initialIndex = previewImageIndex,
             imageList = previewImageList,
+            onRenameSuccess = { oldItem, newItem ->
+                viewModel.renameFile(oldItem.path, newItem.name) {}
+            },
             onDismissRequest = { previewImageList = emptyList() }
         )
     }
@@ -434,6 +437,10 @@ fun CategoryFileListScreen(
             isAudio = playingIsAudio,
             mediaQueue = playingQueue,
             initialIndex = playingQueueIndex,
+            onRenameMedia = { mediaItem, newName ->
+                val targetPath = Uri.parse(mediaItem.id).path ?: mediaItem.id
+                viewModel.renameFile(targetPath, newName) {}
+            },
             onDismissRequest = {
                 playingMediaFile = null
                 playingQueue = emptyList()

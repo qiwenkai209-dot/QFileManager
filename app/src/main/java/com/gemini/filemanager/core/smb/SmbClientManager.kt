@@ -119,14 +119,22 @@ object SmbClientManager {
             setProperty("jcifs.client.soTimeout", "25000")
             setProperty("jcifs.client.responseTimeout", "25000")
             setProperty("jcifs.client.dfs.disabled", "true")
-            setProperty("jcifs.resolveOrder", "DNS,BCAST")
+            // 判断是否纯 IP 地址：若为 IP 则禁用耗时几秒的局域网 NetBIOS 广播 (BCAST)，大幅缩短握手延迟
+            val isPureIp = config.host.matches(Regex("""^\d{1,3}(\.\d{1,3}){3}$""")) || config.host.contains(":")
+            if (isPureIp) {
+                setProperty("jcifs.resolveOrder", "DNS")
+            } else {
+                setProperty("jcifs.resolveOrder", "DNS,BCAST")
+            }
             // 传输层与大包吞吐调优（1MB 大包 + 禁用 Nagle + 提高并发请求窗口）
             setProperty("jcifs.client.tcpNoDelay", "true")
             setProperty("jcifs.client.rcv_buf_size", "1048576")
             setProperty("jcifs.client.snd_buf_size", "1048576")
             setProperty("jcifs.client.maxTransferSize", "1048576")
-            setProperty("jcifs.client.maxMpxCount", "64")
-            setProperty("jcifs.maxBuffers", "32")
+            setProperty("jcifs.client.maxMpxCount", "128")
+            setProperty("jcifs.maxBuffers", "64")
+            setProperty("jcifs.client.listSize", "65535")
+            setProperty("jcifs.client.attrExpirationPeriod", "10000")
             setProperty("jcifs.client.useLargeReadWrite", "true")
             setProperty("jcifs.client.useBatching", "true")
             if (config.isGuest) {
@@ -210,24 +218,35 @@ object SmbClientManager {
         config: SmbConnectionConfig,
         targetUrl: String
     ): Result<List<SmbRemoteFile>> = withContext(Dispatchers.IO) {
-        try {
-            val normalizedUrl = if (targetUrl.endsWith("/")) targetUrl else "$targetUrl/"
-            val list = try {
-                listDirectoryInternal(config, normalizedUrl, forceAnonymous = false)
-            } catch (authEx: SmbAuthException) {
-                if (config.isGuest) {
-                    listDirectoryInternal(config, normalizedUrl, forceAnonymous = true)
-                } else {
-                    throw authEx
+        val normalizedUrl = if (targetUrl.endsWith("/")) targetUrl else "$targetUrl/"
+        var retryCount = 0
+        while (true) {
+            try {
+                val list = try {
+                    listDirectoryInternal(config, normalizedUrl, forceAnonymous = false)
+                } catch (authEx: SmbAuthException) {
+                    if (config.isGuest) {
+                        listDirectoryInternal(config, normalizedUrl, forceAnonymous = true)
+                    } else {
+                        throw authEx
+                    }
                 }
+                return@withContext Result.success(list)
+            } catch (e: Exception) {
+                // 网络瞬断、信道重置或长连接超时时，主动销毁失效上下文并进行一次快速自动重连
+                if (isTransportFailure(e) && retryCount == 0) {
+                    retryCount++
+                    invalidateContext(config.id)
+                    continue
+                }
+                if (isTransportFailure(e)) {
+                    invalidateContext(config.id)
+                }
+                return@withContext Result.failure(Exception(formatSmbError(config, e), e))
             }
-            Result.success(list)
-        } catch (e: Exception) {
-            if (isTransportFailure(e)) {
-                invalidateContext(config.id)
-            }
-            Result.failure(Exception(formatSmbError(config, e), e))
         }
+        @Suppress("UNREACHABLE_CODE")
+        Result.failure(Exception("Unknown error"))
     }
 
     private fun listDirectoryInternal(

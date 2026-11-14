@@ -165,6 +165,7 @@ fun VideoPlayerDialog(
     onGetStreamSpeedBytesPerSec: ((streamToken: String) -> Long)? = null,
     onExternalOpenItem: ((PreparedMediaSource) -> Unit)? = null,
     onReleaseMediaToken: ((streamToken: String) -> Unit)? = null,
+    onRenameMedia: ((oldItem: PlayableMediaItem, newName: String) -> Unit)? = null,
     onDismissRequest: () -> Unit
 ) {
     val fallbackUri = remember(videoFile, videoUri) {
@@ -197,11 +198,15 @@ fun VideoPlayerDialog(
     val activity = context as? Activity
     val scope = rememberCoroutineScope()
 
-    var currentIndex by remember(effectiveQueue, initialIndex) {
-        mutableIntStateOf(initialIndex.coerceIn(0, effectiveQueue.lastIndex))
+    var dynamicQueue by remember(effectiveQueue) { mutableStateOf(effectiveQueue) }
+    var currentIndex by remember(dynamicQueue, initialIndex) {
+        mutableIntStateOf(initialIndex.coerceIn(0, (dynamicQueue.size - 1).coerceAtLeast(0)))
     }
-    val currentQueueItem = effectiveQueue[currentIndex]
+    val currentQueueItem = dynamicQueue.getOrElse(currentIndex) { dynamicQueue[0] }
     val activeIsAudio = currentQueueItem.isAudio
+
+    var showRenameDialog by remember { mutableStateOf(false) }
+    var renameInputText by remember { mutableStateOf("") }
 
     var currentPrepared by remember { mutableStateOf<PreparedMediaSource?>(null) }
     val allocatedTokens = remember { mutableStateListOf<String>() }
@@ -292,7 +297,7 @@ fun VideoPlayerDialog(
     // 切换队列项或重试时加载媒体源
     LaunchedEffect(currentIndex, retryNonce) {
         saveCurrentPositionNow()
-        val targetItem = effectiveQueue[currentIndex]
+        val targetItem = dynamicQueue[currentIndex]
         isPreparingSource = true
         isBuffering = true
         playerErrorMessage = null
@@ -399,7 +404,7 @@ fun VideoPlayerDialog(
                         currentPrepared?.mediaItem?.id?.let { id ->
                             onClearProgress?.invoke(id)
                         }
-                        if (!loopSingleItem && currentIndex < effectiveQueue.lastIndex) {
+                        if (!loopSingleItem && currentIndex < dynamicQueue.lastIndex) {
                             currentIndex++
                         } else {
                             isPlaying = false
@@ -585,7 +590,7 @@ fun VideoPlayerDialog(
     }
 
     val hasPrev = currentIndex > 0
-    val hasNext = currentIndex < effectiveQueue.lastIndex
+    val hasNext = currentIndex < dynamicQueue.lastIndex
     val activeTitle = currentPrepared?.mediaItem?.title ?: currentQueueItem.title
     val activeSize = currentPrepared?.mediaItem?.fileSizeBytes ?: currentQueueItem.fileSizeBytes
     val speedLabel = formatSpeedText(streamSpeedBytesPerSec)
@@ -683,9 +688,9 @@ fun VideoPlayerDialog(
                                             fontWeight = FontWeight.Medium
                                         )
                                     }
-                                    if (effectiveQueue.size > 1) {
+                                    if (dynamicQueue.size > 1) {
                                         Text(
-                                            text = "· ${currentIndex + 1}/${effectiveQueue.size}",
+                                            text = "· ${currentIndex + 1}/${dynamicQueue.size}",
                                             fontSize = 11.sp,
                                             color = MaterialTheme.colorScheme.onSurfaceVariant
                                         )
@@ -701,6 +706,16 @@ fun VideoPlayerDialog(
                             }
 
                             Row(verticalAlignment = Alignment.CenterVertically) {
+                                IconButton(onClick = {
+                                    renameInputText = activeTitle
+                                    showRenameDialog = true
+                                }) {
+                                    Icon(
+                                        Icons.Default.Edit,
+                                        contentDescription = "重命名",
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
                                 if (!activeIsAudio) {
                                     IconButton(onClick = { isFullScreen = true }) {
                                         Icon(Icons.Default.Fullscreen, contentDescription = "全屏播放")
@@ -1063,7 +1078,7 @@ fun VideoPlayerDialog(
                             playbackSpeed = playbackSpeed,
                             hasPrev = hasPrev,
                             hasNext = hasNext,
-                            queueSize = effectiveQueue.size,
+                            queueSize = dynamicQueue.size,
                             currentQueueIndex = currentIndex,
                             loopSingle = loopSingleItem,
                             hasTracks = audioTracks.size > 1 || textTracks.isNotEmpty(),
@@ -1099,11 +1114,15 @@ fun VideoPlayerDialog(
                             aspectMode = aspectMode,
                             hasPrev = hasPrev,
                             hasNext = hasNext,
-                            queueSize = effectiveQueue.size,
+                            queueSize = dynamicQueue.size,
                             currentQueueIndex = currentIndex,
                             loopSingle = loopSingleItem,
                             hasTracks = audioTracks.size > 1 || textTracks.isNotEmpty(),
                             canExternalOpen = videoFile != null || onExternalOpen != null || onExternalOpenItem != null,
+                            onRename = {
+                                renameInputText = activeTitle
+                                showRenameDialog = true
+                            },
                             onExternalOpen = handleOpenExternal,
                             onCycleAspectMode = {
                                 aspectMode = aspectMode.next()
@@ -1182,9 +1201,9 @@ fun VideoPlayerDialog(
                 }
 
                 // 选集 / 播放列表弹窗
-                if (showPlaylistSheet && effectiveQueue.size > 1) {
+                if (showPlaylistSheet && dynamicQueue.size > 1) {
                     PlaylistSelectorOverlay(
-                        queue = effectiveQueue,
+                        queue = dynamicQueue,
                         currentIndex = currentIndex,
                         onSelectIndex = { idx ->
                             currentIndex = idx
@@ -1195,6 +1214,75 @@ fun VideoPlayerDialog(
                 }
             }
         }
+    }
+
+    if (showRenameDialog) {
+        AlertDialog(
+            onDismissRequest = { showRenameDialog = false },
+            title = { Text(if (activeIsAudio) "重命名音频" else "重命名视频") },
+            text = {
+                OutlinedTextField(
+                    value = renameInputText,
+                    onValueChange = { renameInputText = it },
+                    label = { Text("新文件名") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val trimmed = renameInputText.trim()
+                        if (trimmed.isNotBlank() && trimmed != activeTitle) {
+                            val localCandidate = videoFile ?: currentQueueItem.directUri?.path?.let { File(it) }
+                            if (localCandidate != null && localCandidate.exists()) {
+                                val renamed = FileUtils.renameFile(context, localCandidate, trimmed)
+                                if (renamed != null) {
+                                    val newUri = Uri.fromFile(renamed)
+                                    val updatedItem = currentQueueItem.copy(
+                                        id = newUri.toString(),
+                                        title = renamed.name,
+                                        directUri = newUri
+                                    )
+                                    val q = dynamicQueue.toMutableList()
+                                    q[currentIndex] = updatedItem
+                                    dynamicQueue = q
+                                    currentPrepared = currentPrepared?.copy(
+                                        mediaItem = currentPrepared?.mediaItem?.copy(
+                                            id = newUri.toString(),
+                                            title = renamed.name,
+                                            directUri = newUri
+                                        ) ?: updatedItem
+                                    )
+                                    onRenameMedia?.invoke(currentQueueItem, trimmed)
+                                    Toast.makeText(context, "重命名成功", Toast.LENGTH_SHORT).show()
+                                } else {
+                                    Toast.makeText(context, "重命名失败，同名文件可能已存在", Toast.LENGTH_SHORT).show()
+                                }
+                            } else {
+                                val updatedItem = currentQueueItem.copy(title = trimmed)
+                                val q = dynamicQueue.toMutableList()
+                                q[currentIndex] = updatedItem
+                                dynamicQueue = q
+                                currentPrepared = currentPrepared?.copy(
+                                    mediaItem = currentPrepared?.mediaItem?.copy(title = trimmed) ?: updatedItem
+                                )
+                                onRenameMedia?.invoke(currentQueueItem, trimmed)
+                                Toast.makeText(context, "已更新名称", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                        showRenameDialog = false
+                    }
+                ) {
+                    Text("确定")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showRenameDialog = false }) {
+                    Text("取消")
+                }
+            }
+        )
     }
 }
 
@@ -1379,6 +1467,7 @@ private fun FullScreenOverlayControls(
     loopSingle: Boolean,
     hasTracks: Boolean,
     canExternalOpen: Boolean,
+    onRename: (() -> Unit)? = null,
     onExternalOpen: () -> Unit,
     onCycleAspectMode: () -> Unit,
     onToggleOrientation: () -> Unit,
@@ -1435,6 +1524,11 @@ private fun FullScreenOverlayControls(
                 }
             }
 
+            if (onRename != null) {
+                IconButton(onClick = onRename) {
+                    Icon(Icons.Default.Edit, contentDescription = "重命名", tint = Color.White)
+                }
+            }
             IconButton(onClick = onToggleOrientation) {
                 Icon(Icons.Default.ScreenRotation, contentDescription = "旋转屏幕", tint = Color.White)
             }

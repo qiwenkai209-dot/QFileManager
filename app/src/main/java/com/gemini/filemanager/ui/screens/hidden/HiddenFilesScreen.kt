@@ -255,6 +255,9 @@ fun HiddenFilesScreen(
         ImagePreviewDialog(
             initialIndex = previewImageIndex,
             imageList = previewImageList,
+            onRenameSuccess = { oldItem, newItem ->
+                viewModel.renameItem(oldItem.path, newItem.name)
+            },
             onDismissRequest = { previewImageList = emptyList() }
         )
     }
@@ -267,6 +270,10 @@ fun HiddenFilesScreen(
             isAudio = playingIsAudio,
             mediaQueue = playingQueue,
             initialIndex = playingQueueIndex,
+            onRenameMedia = { mediaItem, newName ->
+                val targetPath = Uri.parse(mediaItem.id).path ?: mediaItem.id
+                viewModel.renameItem(targetPath, newName)
+            },
             onDismissRequest = {
                 playingMediaFile = null
                 playingQueue = emptyList()

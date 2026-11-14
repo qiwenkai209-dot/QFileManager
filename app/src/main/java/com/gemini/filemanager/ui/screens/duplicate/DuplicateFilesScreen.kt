@@ -326,6 +326,7 @@ fun DuplicateFilesScreen(
         ImagePreviewDialog(
             initialIndex = previewImageIndex,
             imageList = previewImageList,
+            onRenameSuccess = { _, _ -> },
             onDismissRequest = { previewImageList = emptyList() }
         )
     }
@@ -336,6 +337,7 @@ fun DuplicateFilesScreen(
             videoFile = mediaFile,
             title = mediaFile.name,
             isAudio = previewIsAudio,
+            onRenameMedia = { _, _ -> },
             onDismissRequest = {
                 previewMediaFile = null
             }

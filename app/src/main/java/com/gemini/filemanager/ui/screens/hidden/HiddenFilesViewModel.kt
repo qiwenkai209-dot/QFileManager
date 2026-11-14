@@ -198,4 +198,32 @@ class HiddenFilesViewModel(application: Application) : AndroidViewModel(applicat
             }
         }
     }
+
+    /**
+     * 预览时重命名：原地更新列表项，保持滚动状态与稳定性
+     */
+    fun renameItem(path: String, newName: String) {
+        _uiState.update { current ->
+            val updateRow: (HiddenFileItem) -> HiddenFileItem = { row ->
+                if (row.fileItem.path == path) {
+                    val file = File(path)
+                    val parent = file.parentFile
+                    val newFile = if (parent != null) File(parent, newName) else File(newName)
+                    row.copy(
+                        fileItem = row.fileItem.copy(
+                            path = newFile.absolutePath,
+                            name = newFile.name,
+                            extension = newFile.extension
+                        )
+                    )
+                } else row
+            }
+            val newItems = current.items.map(updateRow)
+            memoryCache = newItems
+            current.copy(
+                items = newItems,
+                filteredItems = filterItems(newItems, current.filterCategory)
+            )
+        }
+    }
 }

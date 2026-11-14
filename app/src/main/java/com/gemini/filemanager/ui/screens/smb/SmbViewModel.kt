@@ -3,6 +3,7 @@ package com.gemini.filemanager.ui.screens.smb
 import android.app.Application
 import android.net.Uri
 import android.os.Environment
+import androidx.collection.LruCache
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.media3.common.MimeTypes
@@ -75,6 +76,8 @@ class SmbViewModel(application: Application) : AndroidViewModel(application) {
     val uiState: StateFlow<SmbUiState> = _uiState.asStateFlow()
 
     val transferTasks: StateFlow<List<SmbTransferTask>> = SmbTransferManager.tasks
+
+    private val directoryCache = LruCache<String, List<SmbRemoteFile>>(60)
 
     private var completedUploadIdsSeen = emptySet<String>()
 
@@ -296,6 +299,7 @@ class SmbViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun disconnect() {
+        directoryCache.evictAll()
         _uiState.update {
             it.copy(
                 activeConfig = null,
@@ -316,45 +320,74 @@ class SmbViewModel(application: Application) : AndroidViewModel(application) {
     fun refreshCurrentDirectory() {
         val url = _uiState.value.currentUrl
         if (url.isNotBlank()) {
-            loadDirectory(url)
+            loadDirectory(url, forceNetwork = true)
         }
     }
 
-    private fun loadDirectory(url: String) {
+    private fun loadDirectory(url: String, forceNetwork: Boolean = false) {
         val config = _uiState.value.activeConfig ?: return
         val isRoot = SmbClientManager.isServerRootUrl(config, url)
+        val cached = if (!forceNetwork) directoryCache.get(url) else null
+
         viewModelScope.launch {
-            _uiState.update {
-                it.copy(
-                    isLoading = true,
-                    isAtServerRoot = isRoot,
-                    errorMessage = null
-                )
-            }
-            val result = SmbClientManager.listDirectory(config, url)
-            result.onSuccess { list ->
+            if (cached != null) {
+                // 秒显内存缓存，不中断 LazyColumn 挂载，防止跳到顶部
                 val state = _uiState.value
                 _uiState.update {
                     it.copy(
-                        files = list,
+                        files = cached,
                         filteredFiles = applyFilterAndSort(
-                            list,
+                            cached,
                             state.searchQuery,
                             state.sortOption,
                             state.categoryFilter
                         ),
                         isLoading = false,
+                        isAtServerRoot = isRoot,
                         errorMessage = null
                     )
                 }
-            }.onFailure { err ->
+            } else {
                 _uiState.update {
                     it.copy(
-                        files = emptyList(),
-                        filteredFiles = emptyList(),
-                        isLoading = false,
-                        errorMessage = err.message ?: "无法读取目录"
+                        isLoading = true,
+                        isAtServerRoot = isRoot,
+                        errorMessage = null
                     )
+                }
+            }
+
+            val result = SmbClientManager.listDirectory(config, url)
+            result.onSuccess { list ->
+                directoryCache.put(url, list)
+                if (_uiState.value.currentUrl == url) {
+                    val state = _uiState.value
+                    _uiState.update {
+                        it.copy(
+                            files = list,
+                            filteredFiles = applyFilterAndSort(
+                                list,
+                                state.searchQuery,
+                                state.sortOption,
+                                state.categoryFilter
+                            ),
+                            isLoading = false,
+                            errorMessage = null
+                        )
+                    }
+                }
+            }.onFailure { err ->
+                if (_uiState.value.currentUrl == url) {
+                    _uiState.update {
+                        it.copy(
+                            files = cached ?: emptyList(),
+                            filteredFiles = cached?.let { c ->
+                                applyFilterAndSort(c, it.searchQuery, it.sortOption, it.categoryFilter)
+                            } ?: emptyList(),
+                            isLoading = false,
+                            errorMessage = if (cached != null) null else (err.message ?: "无法读取目录")
+                        )
+                    }
                 }
             }
         }
@@ -473,7 +506,26 @@ class SmbViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val res = SmbClientManager.createDirectory(config, state.currentUrl, name)
             res.onSuccess {
-                refreshCurrentDirectory()
+                val currentDirUrl = if (state.currentUrl.endsWith("/")) state.currentUrl else "${state.currentUrl}/"
+                val newFolderUrl = "$currentDirUrl$name/"
+                val newFolderItem = SmbRemoteFile(
+                    name = name,
+                    smbUrl = newFolderUrl,
+                    shareName = "",
+                    isDirectory = true,
+                    size = 0L,
+                    lastModified = System.currentTimeMillis(),
+                    extension = "",
+                    category = FileCategory.DOCUMENT
+                )
+                _uiState.update { cur ->
+                    val updated = listOf(newFolderItem) + cur.files.filterNot { it.smbUrl == newFolderUrl }
+                    directoryCache.put(cur.currentUrl, updated)
+                    cur.copy(
+                        files = updated,
+                        filteredFiles = applyFilterAndSort(updated, cur.searchQuery, cur.sortOption, cur.categoryFilter)
+                    )
+                }
                 onResult(true, null)
             }.onFailure { err ->
                 onResult(false, err.message)
@@ -486,11 +538,44 @@ class SmbViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val res = SmbClientManager.renameRemoteFile(config, item, newName)
             res.onSuccess {
-                refreshCurrentDirectory()
+                val oldUrl = item.smbUrl
+                val newUrl = if (item.isDirectory) {
+                    val parent = item.smbUrl.trimEnd('/').substringBeforeLast('/') + "/"
+                    "$parent$newName/"
+                } else {
+                    val parent = item.smbUrl.substringBeforeLast('/') + "/"
+                    "$parent$newName"
+                }
+                val newItem = item.copy(
+                    name = newName,
+                    smbUrl = newUrl,
+                    extension = if (item.isDirectory) "" else newName.substringAfterLast('.', "").lowercase(Locale.ROOT)
+                )
+                _uiState.update { cur ->
+                    val updatedFiles = cur.files.map { if (it.smbUrl == oldUrl) newItem else it }
+                    val updatedFiltered = cur.filteredFiles.map { if (it.smbUrl == oldUrl) newItem else it }
+                    directoryCache.put(cur.currentUrl, updatedFiles)
+                    cur.copy(
+                        files = updatedFiles,
+                        filteredFiles = updatedFiltered
+                    )
+                }
                 onResult(true, null)
             }.onFailure { err ->
                 onResult(false, err.message)
             }
+        }
+    }
+
+    fun renameMediaItem(mediaIdOrUrl: String, newName: String, onResult: ((Boolean, String?) -> Unit)? = null) {
+        val item = _uiState.value.files.firstOrNull { it.smbUrl == mediaIdOrUrl }
+            ?: _uiState.value.filteredFiles.firstOrNull { it.smbUrl == mediaIdOrUrl }
+        if (item != null) {
+            renameItem(item, newName) { success, msg ->
+                onResult?.invoke(success, msg)
+            }
+        } else {
+            onResult?.invoke(false, "未找到目标远程文件")
         }
     }
 
@@ -501,8 +586,17 @@ class SmbViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             val res = SmbClientManager.deleteRemoteItems(config, items)
             res.onSuccess { count ->
+                val deletedUrls = items.map { it.smbUrl }.toSet()
                 clearSelection()
-                refreshCurrentDirectory()
+                _uiState.update { cur ->
+                    val updatedFiles = cur.files.filterNot { deletedUrls.contains(it.smbUrl) }
+                    val updatedFiltered = cur.filteredFiles.filterNot { deletedUrls.contains(it.smbUrl) }
+                    directoryCache.put(cur.currentUrl, updatedFiles)
+                    cur.copy(
+                        files = updatedFiles,
+                        filteredFiles = updatedFiltered
+                    )
+                }
                 onResult(true, "已删除 $count 项")
             }.onFailure { err ->
                 onResult(false, err.message)
