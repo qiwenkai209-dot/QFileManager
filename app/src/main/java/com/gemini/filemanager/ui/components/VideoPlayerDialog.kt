@@ -517,6 +517,12 @@ fun VideoPlayerDialog(
         var tickCount = 0
         while (true) {
             if (!isDraggingSlider) {
+                // 只在有效状态下轮询位置
+                val playerState = exoPlayer.playbackState
+                if (playerState == Player.STATE_IDLE) {
+                    delay(300)
+                    continue
+                }
                 val pos = exoPlayer.currentPosition.coerceAtLeast(0L)
                 val dur = exoPlayer.duration.coerceAtLeast(0L)
                 val buf = exoPlayer.bufferedPosition.coerceAtLeast(0L)

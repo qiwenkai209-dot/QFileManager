@@ -37,13 +37,22 @@ object LocalSendManager {
     private var client: LocalSendClient? = null
 
     val myAlias = "${Build.BRAND} ${Build.MODEL}".trim()
-    val myFingerprint = UUID.randomUUID().toString()
+    private var _myFingerprint: String = ""
+    val myFingerprint: String get() = _myFingerprint
 
     fun init(context: Context) {
         if (isInitialized) return
         isInitialized = true
         val appCtx = context.applicationContext
         appContext = appCtx
+
+        // 持久化 fingerprint，保证每次启动设备指纹一致
+        val prefs = appCtx.getSharedPreferences("localsend_prefs", Context.MODE_PRIVATE)
+        _myFingerprint = prefs.getString("device_fingerprint", null) ?: run {
+            val newFp = UUID.randomUUID().toString()
+            prefs.edit().putString("device_fingerprint", newFp).apply()
+            newFp
+        }
 
         discovery = LocalSendDiscovery(appCtx, scope) { device ->
             _discoveredDevices.update { list ->

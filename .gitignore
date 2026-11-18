@@ -47,6 +47,7 @@ captures/
 *.jks
 *.keystore
 !app/keystore/debug.keystore
+!keystore/debug.keystore
 
 # Google Services (Firebase)
 google-services.json

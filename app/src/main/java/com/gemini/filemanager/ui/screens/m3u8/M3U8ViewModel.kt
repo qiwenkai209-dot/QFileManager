@@ -114,7 +114,7 @@ class M3U8ViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
             } catch (e: Exception) {
-                _uiState.update { it.copy(isScanning = false) }
+                e.printStackTrace()
             } finally {
                 _uiState.update { it.copy(isScanning = false) }
             }

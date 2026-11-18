@@ -388,7 +388,7 @@ class SmbViewModel(application: Application) : AndroidViewModel(application) {
                                 applyFilterAndSort(c, it.searchQuery, it.sortOption, it.categoryFilter)
                             } ?: emptyList(),
                             isLoading = false,
-                            errorMessage = if (cached != null) null else (err.message ?: "无法读取目录")
+                            errorMessage = if (cached != null) "⚠ 刷新失败，显示缓存数据" else (err.message ?: "无法读取目录")
                         )
                     }
                 }

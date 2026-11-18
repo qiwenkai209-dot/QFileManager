@@ -34,13 +34,36 @@ data class DuplicateUiState(
 
 class DuplicateViewModel(application: Application) : AndroidViewModel(application) {
 
+    companion object {
+        // 全局静态缓存，在 ViewModel 销毁后仍然保留，下次进入无需重新扫描
+        private var cachedGroups: List<DuplicateGroup>? = null
+    }
+
     private val _uiState = MutableStateFlow(DuplicateUiState())
     val uiState: StateFlow<DuplicateUiState> = _uiState.asStateFlow()
 
     private var scanJob: Job? = null
 
     init {
-        startScan(DuplicateFilterType.ALL)
+        val cached = cachedGroups
+        if (cached != null) {
+            val totalDups = cached.sumOf { it.duplicateCount }
+            val totalReclaim = cached.sumOf { it.potentialReclaimBytes }
+            val selectedFiles = cached.sumOf { g -> g.files.count { it.isSelected } }
+            val selectedBytes = cached.sumOf { it.selectedReclaimBytes }
+            _uiState.update {
+                it.copy(
+                    groups = cached,
+                    totalDuplicateCount = totalDups,
+                    totalReclaimableBytes = totalReclaim,
+                    selectedFileCount = selectedFiles,
+                    selectedReclaimableBytes = selectedBytes,
+                    scanStage = "上次扫描结果（点击刷新重新扫描）"
+                )
+            }
+        } else {
+            startScan(DuplicateFilterType.ALL)
+        }
     }
 
     /**
@@ -95,6 +118,8 @@ class DuplicateViewModel(application: Application) : AndroidViewModel(applicatio
                         selectedReclaimableBytes = selectedBytes
                     )
                 }
+                // 保存全局缓存，下次进入直接使用
+                cachedGroups = groups
             } catch (e: Exception) {
                 e.printStackTrace()
                 _uiState.update {
