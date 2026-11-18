@@ -223,6 +223,7 @@ fun VideoPlayerDialog(
 
     var isFullScreen by remember { mutableStateOf(false) }
     var showControls by remember { mutableStateOf(true) }
+    var lastControlsInteractionMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
     var isDraggingSlider by remember { mutableStateOf(false) }
     var orientationMode by remember { mutableIntStateOf(0) } // 0: 横屏, 1: 竖屏
     var aspectMode by remember { mutableStateOf(VideoAspectMode.FIT) }
@@ -498,11 +499,16 @@ fun VideoPlayerDialog(
         }
     }
 
-    // 控制栏 4 秒自动淡出
-    LaunchedEffect(showControls, isPlaying, isFullScreen, isDraggingSlider, showSpeedMenu, showTracksSheet, showPlaylistSheet) {
-        if (isFullScreen && showControls && isPlaying && !isDraggingSlider && !showSpeedMenu && !showTracksSheet && !showPlaylistSheet) {
-            delay(4000)
-            showControls = false
+    // 控制栏 4 秒自动淡出（独立轮询，不受其他状态变化影响）
+    LaunchedEffect(isFullScreen) {
+        while (true) {
+            delay(500)
+            if (isFullScreen && showControls && !isDraggingSlider && !showSpeedMenu && !showTracksSheet && !showPlaylistSheet) {
+                val elapsed = System.currentTimeMillis() - lastControlsInteractionMs
+                if (elapsed >= 4000L) {
+                    showControls = false
+                }
+            }
         }
     }
 
@@ -1046,7 +1052,10 @@ fun VideoPlayerDialog(
                                     }
                                     .pointerInput(isFullScreen, playbackSpeed) {
                                         detectTapGestures(
-                                            onTap = { showControls = !showControls },
+                                            onTap = {
+                                                showControls = !showControls
+                                                if (showControls) lastControlsInteractionMs = System.currentTimeMillis()
+                                            },
                                             onDoubleTap = { tapOffset ->
                                                 if (isFullScreen) {
                                                     when {

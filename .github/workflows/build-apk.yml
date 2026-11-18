@@ -37,7 +37,7 @@ jobs:
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: QFileManager-v1.0.0-debug
+          name: QFileManager-v1.0.1-debug
           path: app/build/outputs/apk/debug/*.apk
           retention-days: 30
 
@@ -45,8 +45,8 @@ jobs:
         if: github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.0.0-${{ github.run_number }}
-          name: "Q管理 v1.0.0 (Build ${{ github.run_number }})"
+          tag_name: v1.0.1-${{ github.run_number }}
+          name: "Q管理 v1.0.1 (Build ${{ github.run_number }})"
           body: |
             ### 🚀 Q管理 (QFileManager) 自动构建发布
             
