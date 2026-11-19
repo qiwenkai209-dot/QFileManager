@@ -31,7 +31,7 @@ object FileUtils {
             APK_EXTENSIONS.contains(ext) -> FileCategory.APK
             ARCHIVE_EXTENSIONS.contains(ext) -> FileCategory.ARCHIVE
             ext == "m3u8" -> FileCategory.M3U8
-            else -> FileCategory.DOCUMENT
+            else -> FileCategory.OTHER
         }
     }
 
@@ -50,7 +50,17 @@ object FileUtils {
 
     fun getMimeType(file: File): String {
         val ext = file.extension.lowercase(Locale.ROOT)
-        return MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "*/*"
+        val mime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext)
+        if (!mime.isNullOrBlank()) return mime
+        return when (getCategory(ext)) {
+            FileCategory.VIDEO -> "video/*"
+            FileCategory.AUDIO -> "audio/*"
+            FileCategory.IMAGE -> "image/*"
+            FileCategory.APK -> "application/vnd.android.package-archive"
+            FileCategory.ARCHIVE -> "application/zip"
+            FileCategory.DOCUMENT -> "text/plain"
+            else -> "*/*"
+        }
     }
 
     fun openFile(context: Context, file: File) {
@@ -114,10 +124,31 @@ object FileUtils {
         return file.delete()
     }
 
+    /**
+     * 智能计算安全新文件名：当原文件有扩展名且用户输入未带扩展名时，自动保留原扩展名，防止视频/音频格式损坏无法打开
+     */
+    fun resolveSafeNewFileName(originalFile: File, inputNewName: String): String {
+        val trimmed = inputNewName.trim()
+        if (trimmed.isEmpty()) return originalFile.name
+        if (originalFile.isDirectory) return trimmed
+        val originalExt = originalFile.extension
+        if (originalExt.isNotBlank()) {
+            val lastDotIndex = trimmed.lastIndexOf('.')
+            // 用户输入中没有点，或者点在最前或最后（如 ".mp4" 或 "myvideo."）
+            if (lastDotIndex <= 0 || lastDotIndex == trimmed.length - 1) {
+                val cleanBase = if (lastDotIndex == trimmed.length - 1) trimmed.dropLast(1) else trimmed
+                return "$cleanBase.$originalExt"
+            }
+        }
+        return trimmed
+    }
+
     fun renameFile(context: Context, file: File, newName: String): File? {
         if (!file.exists() || newName.isBlank()) return null
+        val safeName = resolveSafeNewFileName(file, newName)
         val parent = file.parentFile ?: return null
-        val target = File(parent, newName)
+        val target = File(parent, safeName)
+        if (file.absolutePath == target.absolutePath) return file
         if (target.exists()) return null
         val success = file.renameTo(target)
         if (success) {

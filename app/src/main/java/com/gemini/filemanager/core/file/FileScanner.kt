@@ -47,7 +47,7 @@ object FileScanner {
             FileCategory.IMAGE -> results.addAll(scanMediaStore(context, MediaStore.Images.Media.EXTERNAL_CONTENT_URI, FileCategory.IMAGE, onBatch))
             FileCategory.AUDIO -> results.addAll(scanMediaStore(context, MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, FileCategory.AUDIO, onBatch))
             FileCategory.VIDEO -> results.addAll(scanMediaStore(context, MediaStore.Video.Media.EXTERNAL_CONTENT_URI, FileCategory.VIDEO, onBatch))
-            FileCategory.DOCUMENT, FileCategory.APK, FileCategory.ARCHIVE, FileCategory.M3U8 -> {
+            FileCategory.DOCUMENT, FileCategory.APK, FileCategory.ARCHIVE, FileCategory.M3U8, FileCategory.OTHER -> {
                 results.addAll(scanFileSystemForCategory(context, category, onBatch))
             }
         }
@@ -125,6 +125,16 @@ object FileScanner {
         return list
     }
 
+    private val KNOWN_NON_OTHER_EXTENSIONS = setOf(
+        "jpg", "jpeg", "png", "webp", "gif", "bmp", "svg", "heic", "raw",
+        "mp3", "wav", "flac", "aac", "ogg", "m4a", "wma", "ape", "opus", "alac", "aiff", "dsf",
+        "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "epub", "md", "csv", "log",
+        "mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "ts", "m4v", "3gp", "3g2", "mpg", "mpeg", "vob", "m2ts", "mts", "rmvb", "rm", "asf", "ogv",
+        "apk", "apks", "xapk",
+        "zip", "rar", "7z", "tar", "gz", "bz2", "xz",
+        "m3u8"
+    )
+
     private fun scanFileSystemForCategory(
         context: Context,
         category: FileCategory,
@@ -134,7 +144,7 @@ object FileScanner {
         val root = Environment.getExternalStorageDirectory()
         val targetExtensions = when (category) {
             FileCategory.APK -> setOf("apk", "apks", "xapk")
-            FileCategory.ARCHIVE -> setOf("zip", "rar", "7z", "tar", "gz")
+            FileCategory.ARCHIVE -> setOf("zip", "rar", "7z", "tar", "gz", "bz2", "xz")
             FileCategory.DOCUMENT -> setOf("pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "epub", "md", "csv")
             FileCategory.M3U8 -> setOf("m3u8")
             else -> emptySet()
@@ -169,7 +179,13 @@ object FileScanner {
                 scanDirRecursively(file, targetExtensions, results, context, category, depth + 1, onBatch)
             } else {
                 val ext = file.extension.lowercase(Locale.ROOT)
-                if (targetExtensions.contains(ext)) {
+                val isMatch = if (category == FileCategory.OTHER) {
+                    !KNOWN_NON_OTHER_EXTENSIONS.contains(ext)
+                } else {
+                    targetExtensions.contains(ext)
+                }
+
+                if (isMatch) {
                     var appName: String? = null
                     var pkg: String? = null
                     var ver: String? = null

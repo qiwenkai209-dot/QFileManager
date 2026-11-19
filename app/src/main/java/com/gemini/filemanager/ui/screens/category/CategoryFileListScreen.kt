@@ -347,12 +347,14 @@ fun CategoryFileListScreen(
                                     val allMedia = state.filteredFiles.filter { it.category == item.category }
                                     val isAud = (item.category == FileCategory.AUDIO)
                                     val queue = allMedia.map { m ->
+                                        val mFile = File(m.path)
                                         PlayableMediaItem(
                                             id = m.path,
                                             title = m.name,
                                             fileSizeBytes = m.size,
                                             isAudio = isAud,
-                                            directUri = Uri.fromFile(File(m.path))
+                                            directUri = Uri.fromFile(mFile),
+                                            mimeType = FileUtils.getMimeType(mFile)
                                         )
                                     }
                                     val idx = queue.indexOfFirst { it.id == item.path }.coerceAtLeast(0)
@@ -423,7 +425,7 @@ fun CategoryFileListScreen(
             initialIndex = previewImageIndex,
             imageList = previewImageList,
             onRenameSuccess = { oldItem, newItem ->
-                viewModel.renameFile(oldItem.path, newItem.name) {}
+                viewModel.updateRenamedFileItem(oldItem.path, File(newItem.path))
             },
             onDismissRequest = { previewImageList = emptyList() }
         )

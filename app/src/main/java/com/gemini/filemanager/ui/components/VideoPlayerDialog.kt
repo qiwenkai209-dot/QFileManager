@@ -612,8 +612,9 @@ fun VideoPlayerDialog(
 
     val handleOpenExternal: () -> Unit = {
         val prepared = currentPrepared
-        if (videoFile != null) {
-            FileUtils.openFile(context, videoFile)
+        val currentLocal = currentQueueItem.directUri?.path?.let { File(it) } ?: videoFile
+        if (currentLocal != null && currentLocal.exists()) {
+            FileUtils.openFile(context, currentLocal)
         } else if (prepared != null && onExternalOpenItem != null) {
             prepared.streamToken?.let { externalOpenedTokens.add(it) }
             onExternalOpenItem(prepared)
@@ -1285,7 +1286,7 @@ fun VideoPlayerDialog(
                     onClick = {
                         val trimmed = renameInputText.trim()
                         if (trimmed.isNotBlank() && trimmed != activeTitle) {
-                            val localCandidate = videoFile ?: currentQueueItem.directUri?.path?.let { File(it) }
+                            val localCandidate = currentQueueItem.directUri?.path?.let { File(it) } ?: videoFile
                             if (localCandidate != null && localCandidate.exists()) {
                                 val renamed = FileUtils.renameFile(context, localCandidate, trimmed)
                                 if (renamed != null) {
@@ -1305,7 +1306,7 @@ fun VideoPlayerDialog(
                                             directUri = newUri
                                         ) ?: updatedItem
                                     )
-                                    onRenameMedia?.invoke(currentQueueItem, trimmed)
+                                    onRenameMedia?.invoke(currentQueueItem, renamed.name)
                                     Toast.makeText(context, "重命名成功", Toast.LENGTH_SHORT).show()
                                 } else {
                                     Toast.makeText(context, "重命名失败，同名文件可能已存在", Toast.LENGTH_SHORT).show()

@@ -30,6 +30,7 @@ import com.gemini.filemanager.data.model.FileCategory
 import com.gemini.filemanager.ui.screens.category.CategoryFileListScreen
 import com.gemini.filemanager.ui.screens.cleaner.StorageCleanerScreen
 import com.gemini.filemanager.ui.screens.duplicate.DuplicateFilesScreen
+import com.gemini.filemanager.ui.screens.explorer.StorageExplorerScreen
 import com.gemini.filemanager.ui.screens.hidden.HiddenFilesScreen
 import com.gemini.filemanager.ui.screens.home.HomeScreen
 import com.gemini.filemanager.ui.screens.localsend.LocalSendScreen
@@ -256,6 +257,9 @@ fun MainNavigation(initialFiles: List<File> = emptyList()) {
                 },
                 onNavigateHiddenFiles = {
                     navController.navigate("hidden_files")
+                },
+                onNavigateStorageExplorer = {
+                    navController.navigate("explorer")
                 }
             )
         }
@@ -324,6 +328,20 @@ fun MainNavigation(initialFiles: List<File> = emptyList()) {
         composable("hidden_files") {
             HiddenFilesScreen(
                 onBack = { navController.popBackStack() }
+            )
+        }
+
+        composable("explorer") {
+            StorageExplorerScreen(
+                onBack = { navController.popBackStack() },
+                onSendViaLocalSend = { files ->
+                    targetTransmitFiles = files
+                    navController.navigate("localsend")
+                },
+                onUploadToSmb = { files ->
+                    targetSmbUploadFiles = files
+                    navController.navigate("smb")
+                }
             )
         }
     }

@@ -37,7 +37,7 @@ jobs:
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: QFileManager-v1.0.2-debug
+          name: QFileManager-v1.0.3-debug
           path: app/build/outputs/apk/debug/*.apk
           retention-days: 30
 
@@ -45,19 +45,21 @@ jobs:
         if: github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.0.2-${{ github.run_number }}
-          name: "Q管理 v1.0.2 (Build ${{ github.run_number }})"
+          tag_name: v1.0.3-${{ github.run_number }}
+          name: "Q管理 v1.0.3 (Build ${{ github.run_number }})"
           body: |
             ### 🚀 Q管理 (QFileManager) 自动构建发布
             
             - **Commit**: ${{ github.sha }}
             - **功能更新**:
+              - 🎬 彻底修复重命名后视频文件无法打开的 Bug，增加安全文件名与扩展名自动保护
+              - 🔍 文件分类新增「其他文件」分类及全盘实时模糊搜索
+              - 📁 新增「打开手机根目录」完整文件浏览器，支持层级面包屑导航、文件夹置顶、新建文件夹、多选批量操作与剪贴板复制剪切粘贴
               - 📱 支持扫描手机安装的所有应用（系统+第三方）
               - 🗑️ 支持一键卸载、清理外部残留数据、一键直达系统清除应用缓存与全部数据
               - 🧹 本机文件与临时垃圾深度清理（相册缩略图、系统临时文件、日志崩溃包、废弃安装包）
               - ⚡ M3U8 离线缓存批量嗅探与秒级无损转 MP4（带实时进度与删除源文件）
               - 🔍 全盘重复文件深度筛查（三阶段高精度流式比对）
-              - 🎬 高级音视频播放器（支持进度条自由拖拽、无黑边全屏铺满与横竖屏旋转）
               - 📡 开源 LocalSend 协议局域网高速互传
               - 🌐 SMB 局域网网络共享（SMB1/2/3、局域网探测、双向断点续传、Range 代理在线播片与多图预览）
           files: app/build/outputs/apk/debug/*.apk

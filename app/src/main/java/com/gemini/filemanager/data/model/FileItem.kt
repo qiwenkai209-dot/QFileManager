@@ -9,7 +9,8 @@ enum class FileCategory(val displayName: String, val iconRes: String) {
     VIDEO("视频", "ic_video"),
     APK("安装包", "ic_apk"),
     ARCHIVE("压缩包", "ic_archive"),
-    M3U8("M3U8缓存", "ic_m3u8")
+    M3U8("M3U8缓存", "ic_m3u8"),
+    OTHER("其他文件", "ic_other")
 }
 
 data class FileItem(

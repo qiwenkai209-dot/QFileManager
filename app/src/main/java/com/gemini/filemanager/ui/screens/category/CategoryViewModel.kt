@@ -280,40 +280,58 @@ class CategoryViewModel(application: Application) : AndroidViewModel(application
     }
 
     /**
-     * 重命名文件：原地替换列表项，绝对不会清空列表或跳到最前面
+     * 原地精准更新已重命名项，同时同步路径、名称、修改时间、扩展名与 Uri，绝对不重置滚动位置
+     */
+    fun updateRenamedFileItem(oldPath: String, newFile: File) {
+        val newPath = newFile.absolutePath
+        val newFileName = newFile.name
+        val newLastModified = newFile.lastModified()
+        val newExtension = newFile.extension.lowercase(Locale.ROOT)
+        val newUri = android.net.Uri.fromFile(newFile)
+
+        _uiState.update { current ->
+            val updateItem: (FileItem) -> FileItem = { old ->
+                if (old.path == oldPath) {
+                    old.copy(
+                        path = newPath,
+                        name = newFileName,
+                        lastModified = newLastModified,
+                        extension = newExtension,
+                        uri = newUri
+                    )
+                } else old
+            }
+            val newFiles = current.files.map(updateItem)
+            val newFiltered = current.filteredFiles.map(updateItem)
+            categoryCache[currentCategory] = newFiles
+
+            current.copy(
+                files = newFiles,
+                filteredFiles = newFiltered
+            )
+        }
+    }
+
+    /**
+     * 重命名文件：原地替换列表项，自动补全/保留原后缀，防止视频改名后丢失格式无法打开
      */
     fun renameFile(path: String, newName: String, onResult: (Boolean) -> Unit) {
         viewModelScope.launch(Dispatchers.IO) {
             val file = File(path)
-            val result = FileUtils.renameFile(getApplication(), file, newName)
-            if (result != null) {
-                // 原地精准更新列表项，保持滚动状态与视图位置，不重置到顶部
-                val newPath = result.absolutePath
-                val newFileName = result.name
-                val newLastModified = result.lastModified()
-                val newExtension = result.extension.lowercase(Locale.ROOT)
+            val safeName = FileUtils.resolveSafeNewFileName(file, newName)
+            val parent = file.parentFile
+            val targetFile = if (parent != null) File(parent, safeName) else null
 
-                _uiState.update { current ->
-                    val updateItem: (FileItem) -> FileItem = { old ->
-                        if (old.path == path) {
-                            old.copy(
-                                path = newPath,
-                                name = newFileName,
-                                lastModified = newLastModified,
-                                extension = newExtension
-                            )
-                        } else old
-                    }
-                    val newFiles = current.files.map(updateItem)
-                    val newFiltered = current.filteredFiles.map(updateItem)
-                    categoryCache[currentCategory] = newFiles
+            val resultFile: File? = if (file.exists()) {
+                FileUtils.renameFile(getApplication(), file, safeName)
+            } else if (targetFile != null && targetFile.exists()) {
+                targetFile
+            } else {
+                null
+            }
 
-                    current.copy(
-                        files = newFiles,
-                        filteredFiles = newFiltered
-                    )
-                }
-
+            if (resultFile != null) {
+                updateRenamedFileItem(path, resultFile)
                 withContext(Dispatchers.Main) {
                     onResult(true)
                 }

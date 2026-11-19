@@ -705,6 +705,7 @@ private fun getCategoryIcon(category: FileCategory): ImageVector {
         FileCategory.APK -> Icons.Default.Android
         FileCategory.ARCHIVE -> Icons.Default.Archive
         FileCategory.M3U8 -> Icons.Default.VideoLibrary
+        FileCategory.OTHER -> Icons.Default.InsertDriveFile
     }
 }
 
@@ -717,5 +718,6 @@ private fun getCategoryColor(category: FileCategory): Color {
         FileCategory.APK -> Color(0xFF009688)
         FileCategory.ARCHIVE -> Color(0xFFFF9800)
         FileCategory.M3U8 -> Color(0xFFFF5722)
+        FileCategory.OTHER -> Color(0xFF607D8B)
     }
 }

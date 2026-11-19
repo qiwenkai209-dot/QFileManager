@@ -37,6 +37,7 @@ fun HomeScreen(
     onNavigateDuplicate: () -> Unit,
     onNavigateCleaner: () -> Unit,
     onNavigateHiddenFiles: () -> Unit = {},
+    onNavigateStorageExplorer: () -> Unit = {},
     viewModel: HomeViewModel = viewModel()
 ) {
     val state by viewModel.uiState.collectAsState()
@@ -125,12 +126,13 @@ fun HomeScreen(
             contentPadding = PaddingValues(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            // 1. 存储状态卡片（带一键去清理入口）
+            // 1. 存储状态卡片（带一键去清理与浏览根目录入口）
             item {
                 StorageCard(
                     totalBytes = state.totalStorage,
                     availableBytes = state.availableStorage,
-                    onCleanClick = onNavigateCleaner
+                    onCleanClick = onNavigateCleaner,
+                    onBrowseClick = onNavigateStorageExplorer
                 )
             }
 
@@ -288,6 +290,26 @@ fun HomeScreen(
                             onClick = { onNavigateCategory(FileCategory.ARCHIVE) }
                         )
                     }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        CategoryGridItem(
+                            modifier = Modifier.weight(1f),
+                            category = FileCategory.OTHER,
+                            icon = Icons.Default.InsertDriveFile,
+                            color = Color(0xFF607D8B),
+                            onClick = { onNavigateCategory(FileCategory.OTHER) }
+                        )
+                        CategoryGridItem(
+                            modifier = Modifier.weight(1f),
+                            category = FileCategory.OTHER,
+                            title = "手机根目录",
+                            icon = Icons.Default.FolderOpen,
+                            color = Color(0xFF00897B),
+                            onClick = onNavigateStorageExplorer
+                        )
+                    }
                 }
             }
         }
@@ -325,13 +347,17 @@ fun HomeScreen(
 fun StorageCard(
     totalBytes: Long,
     availableBytes: Long,
-    onCleanClick: (() -> Unit)? = null
+    onCleanClick: (() -> Unit)? = null,
+    onBrowseClick: (() -> Unit)? = null
 ) {
     val usedBytes = (totalBytes - availableBytes).coerceAtLeast(0L)
     val usedPercent = if (totalBytes > 0) (usedBytes.toFloat() / totalBytes) else 0f
 
     Card(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(20.dp))
+            .then(if (onBrowseClick != null) Modifier.clickable { onBrowseClick() } else Modifier),
         shape = RoundedCornerShape(20.dp),
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f)
@@ -344,11 +370,22 @@ fun StorageCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Column {
-                    Text(
-                        text = "手机内部存储",
-                        fontSize = 18.sp,
-                        fontWeight = FontWeight.Bold
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = "手机内部存储",
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        if (onBrowseClick != null) {
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Icon(
+                                imageVector = Icons.Default.ChevronRight,
+                                contentDescription = "打开根目录",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                    }
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
                         text = "已使用 ${FileUtils.formatFileSize(usedBytes)} / 共 ${FileUtils.formatFileSize(totalBytes)}",
@@ -359,20 +396,30 @@ fun StorageCard(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         text = "${(usedPercent * 100).toInt()}%",
-                        fontSize = 24.sp,
+                        fontSize = 22.sp,
                         fontWeight = FontWeight.Black,
                         color = MaterialTheme.colorScheme.primary
                     )
+                    if (onBrowseClick != null) {
+                        Spacer(modifier = Modifier.width(8.dp))
+                        OutlinedButton(
+                            onClick = onBrowseClick,
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Text("浏览", fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                        }
+                    }
                     if (onCleanClick != null) {
-                        Spacer(modifier = Modifier.width(12.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
                         Button(
                             onClick = onCleanClick,
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                            shape = RoundedCornerShape(10.dp)
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                            shape = RoundedCornerShape(8.dp)
                         ) {
-                            Icon(Icons.Default.CleaningServices, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text("去清理", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            Icon(Icons.Default.CleaningServices, contentDescription = null, modifier = Modifier.size(14.dp))
+                            Spacer(modifier = Modifier.width(2.dp))
+                            Text("清理", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                         }
                     }
                 }
@@ -448,10 +495,12 @@ fun FeatureToolCard(
 fun CategoryGridItem(
     modifier: Modifier = Modifier,
     category: FileCategory,
+    title: String? = null,
     icon: ImageVector,
     color: Color,
     onClick: () -> Unit
 ) {
+    val displayTitle = title ?: category.displayName
     Card(
         modifier = modifier
             .clip(RoundedCornerShape(16.dp))
@@ -477,14 +526,14 @@ fun CategoryGridItem(
             ) {
                 Icon(
                     imageVector = icon,
-                    contentDescription = category.displayName,
+                    contentDescription = displayTitle,
                     tint = color,
                     modifier = Modifier.size(24.dp)
                 )
             }
             Spacer(modifier = Modifier.height(8.dp))
             Text(
-                text = category.displayName,
+                text = displayTitle,
                 fontSize = 14.sp,
                 fontWeight = FontWeight.Medium
             )
