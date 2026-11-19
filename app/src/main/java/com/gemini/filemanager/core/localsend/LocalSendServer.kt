@@ -5,6 +5,7 @@ import android.media.MediaScannerConnection
 import android.os.Build
 import android.os.Environment
 import com.gemini.filemanager.core.background.AppBackgroundKeepAliveManager
+import com.gemini.filemanager.data.model.DiscoveredDevice
 import com.gemini.filemanager.data.model.FileInfoDto
 import com.gemini.filemanager.data.model.LocalSendDeviceDto
 import com.gemini.filemanager.data.model.PrepareUploadRequestDto
@@ -23,6 +24,7 @@ class LocalSendServer(
     private val port: Int = LocalSendConstants.PORT,
     private val myAlias: String,
     private val myFingerprint: String,
+    private val onDeviceDiscovered: (DiscoveredDevice) -> Unit = {},
     private val onReceiveProgress: (fileName: String, progress: Float, totalBytes: Long) -> Unit,
     private val onFileReceived: (File) -> Unit
 ) : NanoHTTPD(port) {
@@ -35,7 +37,14 @@ class LocalSendServer(
         val uri = session.uri
         val method = session.method
 
-        if (uri == LocalSendConstants.PATH_INFO && method == Method.GET) {
+        // 统一处理 CORS 预检
+        if (method == Method.OPTIONS) {
+            val response = newFixedLengthResponse(Response.Status.OK, "text/plain", "")
+            return addCorsHeaders(response)
+        }
+
+        // 设备信息查询接口 (LocalSend v2)
+        if (uri == LocalSendConstants.PATH_INFO && (method == Method.GET || method == Method.POST)) {
             val myInfo = LocalSendDeviceDto(
                 alias = myAlias,
                 version = LocalSendConstants.PROTOCOL_VERSION,
@@ -47,14 +56,59 @@ class LocalSendServer(
                 download = true
             )
             val jsonStr = json.encodeToString(LocalSendDeviceDto.serializer(), myInfo)
-            return newFixedLengthResponse(Response.Status.OK, "application/json", jsonStr)
+            val response = newFixedLengthResponse(Response.Status.OK, "application/json; charset=utf-8", jsonStr)
+            return addCorsHeaders(response)
         }
 
+        // 官方对等主动注册接口 (LocalSend v2 /api/localsend/v2/register)
+        if (uri == LocalSendConstants.PATH_REGISTER && method == Method.POST) {
+            val map = HashMap<String, String>()
+            try {
+                session.parseBody(map)
+                val postData = map["postData"] ?: ""
+                if (postData.isNotEmpty()) {
+                    val dto = json.decodeFromString<LocalSendDeviceDto>(postData)
+                    if (dto.fingerprint != myFingerprint) {
+                        val senderIp = session.remoteIpAddress
+                            ?: session.headers["http-client-ip"]
+                            ?: ""
+                        if (senderIp.isNotEmpty()) {
+                            onDeviceDiscovered(
+                                DiscoveredDevice(
+                                    ip = senderIp,
+                                    port = dto.port,
+                                    device = dto
+                                )
+                            )
+                        }
+                    }
+                }
+                val myInfo = LocalSendDeviceDto(
+                    alias = myAlias,
+                    version = LocalSendConstants.PROTOCOL_VERSION,
+                    deviceModel = Build.MODEL,
+                    deviceType = "mobile",
+                    fingerprint = myFingerprint,
+                    port = port,
+                    protocol = "http",
+                    download = true
+                )
+                val jsonStr = json.encodeToString(LocalSendDeviceDto.serializer(), myInfo)
+                val response = newFixedLengthResponse(Response.Status.OK, "application/json; charset=utf-8", jsonStr)
+                return addCorsHeaders(response)
+            } catch (e: Exception) {
+                e.printStackTrace()
+                val response = newFixedLengthResponse(Response.Status.BAD_REQUEST, "text/plain", "Bad Request")
+                return addCorsHeaders(response)
+            }
+        }
+
+        // 上传会话准备
         if (uri == LocalSendConstants.PATH_PREPARE_UPLOAD && method == Method.POST) {
             val map = HashMap<String, String>()
-            session.parseBody(map)
-            val postData = map["postData"] ?: ""
-            return try {
+            try {
+                session.parseBody(map)
+                val postData = map["postData"] ?: ""
                 val req = json.decodeFromString<PrepareUploadRequestDto>(postData)
                 val sessionId = UUID.randomUUID().toString()
                 pendingSessions[sessionId] = req.files
@@ -62,13 +116,16 @@ class LocalSendServer(
                 val fileTokenMap = req.files.keys.associateWith { UUID.randomUUID().toString() }
                 val respDto = PrepareUploadResponseDto(sessionId = sessionId, files = fileTokenMap)
                 val respJson = json.encodeToString(PrepareUploadResponseDto.serializer(), respDto)
-                newFixedLengthResponse(Response.Status.OK, "application/json", respJson)
+                val response = newFixedLengthResponse(Response.Status.OK, "application/json; charset=utf-8", respJson)
+                return addCorsHeaders(response)
             } catch (e: Exception) {
                 e.printStackTrace()
-                newFixedLengthResponse(Response.Status.BAD_REQUEST, "text/plain", "Bad Request: ${e.message}")
+                val response = newFixedLengthResponse(Response.Status.BAD_REQUEST, "text/plain", "Bad Request: ${e.message}")
+                return addCorsHeaders(response)
             }
         }
 
+        // 文件实际流式上传接收
         if (uri == LocalSendConstants.PATH_UPLOAD && method == Method.POST) {
             val params = session.parameters
             val sessionId = params["sessionId"]?.firstOrNull() ?: ""
@@ -128,7 +185,7 @@ class LocalSendServer(
                     tempFile.delete()
                 }
 
-                // 通知系统刷新
+                // 通知系统媒体库刷新
                 MediaScannerConnection.scanFile(
                     appCtx,
                     arrayOf(targetFile.absolutePath),
@@ -137,14 +194,15 @@ class LocalSendServer(
                 )
                 onFileReceived(targetFile)
 
-                newFixedLengthResponse(Response.Status.OK, "application/json", "{}")
+                val response = newFixedLengthResponse(Response.Status.OK, "application/json; charset=utf-8", "{}")
+                addCorsHeaders(response)
             } catch (e: Exception) {
                 try {
                     tempFile.delete()
-                } catch (_: Exception) {
-                }
+                } catch (_: Exception) {}
                 e.printStackTrace()
-                newFixedLengthResponse(Response.Status.INTERNAL_ERROR, "text/plain", "Error: ${e.message}")
+                val response = newFixedLengthResponse(Response.Status.INTERNAL_ERROR, "text/plain", "Error: ${e.message}")
+                addCorsHeaders(response)
             } finally {
                 if (activeUploads.decrementAndGet() <= 0) {
                     AppBackgroundKeepAliveManager.releaseLease(appCtx, "localsend_recv")
@@ -152,6 +210,14 @@ class LocalSendServer(
             }
         }
 
-        return newFixedLengthResponse(Response.Status.NOT_FOUND, "text/plain", "Not Found")
+        val notFoundResponse = newFixedLengthResponse(Response.Status.NOT_FOUND, "text/plain", "Not Found")
+        return addCorsHeaders(notFoundResponse)
+    }
+
+    private fun addCorsHeaders(response: Response): Response {
+        response.addHeader("Access-Control-Allow-Origin", "*")
+        response.addHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        response.addHeader("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        return response
     }
 }

@@ -54,17 +54,29 @@ object LocalSendManager {
             newFp
         }
 
-        discovery = LocalSendDiscovery(appCtx, scope) { device ->
-            _discoveredDevices.update { list ->
-                val filtered = list.filter { it.device.fingerprint != device.device.fingerprint }
-                filtered + device
+        discovery = LocalSendDiscovery(
+            context = appCtx,
+            scope = scope,
+            myAlias = myAlias,
+            myFingerprint = myFingerprint,
+            onDeviceFound = { device ->
+                _discoveredDevices.update { list ->
+                    val filtered = list.filter { it.device.fingerprint != device.device.fingerprint }
+                    filtered + device
+                }
             }
-        }
+        )
 
         server = LocalSendServer(
             context = appCtx,
             myAlias = myAlias,
             myFingerprint = myFingerprint,
+            onDeviceDiscovered = { device ->
+                _discoveredDevices.update { list ->
+                    val filtered = list.filter { it.device.fingerprint != device.device.fingerprint }
+                    filtered + device
+                }
+            },
             onReceiveProgress = { fileName, progress, totalBytes ->
                 updateReceiveProgress(fileName, progress, totalBytes)
             },
