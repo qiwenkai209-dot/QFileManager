@@ -1,32 +1,48 @@
 package com.gemini.filemanager
 
 import android.Manifest
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.media.MediaScannerConnection
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.provider.OpenableColumns
 import android.provider.Settings
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
+import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
+import androidx.lifecycle.lifecycleScope
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.gemini.filemanager.core.background.AppBackgroundKeepAliveManager
+import com.gemini.filemanager.core.file.FileUtils
 import com.gemini.filemanager.data.model.FileCategory
+import com.gemini.filemanager.ui.components.VideoPlayerDialog
 import com.gemini.filemanager.ui.screens.category.CategoryFileListScreen
 import com.gemini.filemanager.ui.screens.cleaner.StorageCleanerScreen
 import com.gemini.filemanager.ui.screens.duplicate.DuplicateFilesScreen
@@ -37,12 +53,34 @@ import com.gemini.filemanager.ui.screens.localsend.LocalSendScreen
 import com.gemini.filemanager.ui.screens.m3u8.M3U8ConvertScreen
 import com.gemini.filemanager.ui.screens.smb.SmbScreen
 import com.gemini.filemanager.ui.theme.AndroidFileManagerTheme
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.FileOutputStream
+
+sealed class IncomingAction {
+    data class Play(
+        val uri: Uri,
+        val title: String,
+        val isAudio: Boolean,
+        val file: File? = null
+    ) : IncomingAction()
+
+    data class OtherFile(
+        val uri: Uri,
+        val title: String,
+        val size: Long,
+        val mimeType: String,
+        val file: File? = null
+    ) : IncomingAction()
+}
 
 class MainActivity : ComponentActivity() {
 
     private var hasStoragePermission by mutableStateOf(false)
     private var sharedFilesToTransmit by mutableStateOf<List<File>>(emptyList())
+    private var incomingAction by mutableStateOf<IncomingAction?>(null)
     private var notificationPromptedThisSession = false
 
     private val permissionLauncher = registerForActivityResult(
@@ -60,18 +98,55 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        handleIncomingShareIntent(intent)
+        handleIncomingIntent(intent)
         checkStoragePermission()
         requestNotificationPermissionIfNeeded()
 
         setContent {
             AndroidFileManagerTheme {
-                if (!hasStoragePermission) {
+                val action = incomingAction
+                if (action is IncomingAction.Play) {
+                    // 作为专业三方播放器直接全屏拉起播放，无论有无全盘存储权限均可秒开
+                    VideoPlayerDialog(
+                        videoUri = action.uri,
+                        videoFile = action.file,
+                        title = action.title,
+                        isAudio = action.isAudio,
+                        onDismissRequest = {
+                            incomingAction = null
+                            if (!hasStoragePermission) {
+                                finish()
+                            }
+                        }
+                    )
+                } else if (!hasStoragePermission) {
                     PermissionGuideScreen(
                         onRequestPermission = { requestStoragePermission() }
                     )
                 } else {
                     MainNavigation(initialFiles = sharedFilesToTransmit)
+
+                    // 如果点击了其它非媒体文件，弹出专业的三方文件打开与处理操作对话框
+                    if (action is IncomingAction.OtherFile) {
+                        ExternalOtherFileDialog(
+                            action = action,
+                            onPlayAsMedia = {
+                                incomingAction = IncomingAction.Play(
+                                    uri = action.uri,
+                                    title = action.title,
+                                    isAudio = false,
+                                    file = action.file
+                                )
+                            },
+                            onSendViaLocalSend = { file ->
+                                sharedFilesToTransmit = listOf(file)
+                                incomingAction = null
+                            },
+                            onDismiss = {
+                                incomingAction = null
+                            }
+                        )
+                    }
                 }
             }
         }
@@ -100,20 +175,22 @@ class MainActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        handleIncomingShareIntent(intent)
+        handleIncomingIntent(intent)
     }
 
-    private fun handleIncomingShareIntent(intent: Intent?) {
+    private fun handleIncomingIntent(intent: Intent?) {
         if (intent == null) return
         val action = intent.action
         val type = intent.type
 
+        // 1. 处理系统分享发送 (ACTION_SEND / ACTION_SEND_MULTIPLE)
         if (Intent.ACTION_SEND == action && type != null) {
             @Suppress("DEPRECATION")
             val uri = intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
             resolveSharedUriToFile(uri)?.let {
                 sharedFilesToTransmit = listOf(it)
             }
+            return
         } else if (Intent.ACTION_SEND_MULTIPLE == action && type != null) {
             @Suppress("DEPRECATION")
             val uris = intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM)
@@ -121,10 +198,77 @@ class MainActivity : ComponentActivity() {
             if (list.isNotEmpty()) {
                 sharedFilesToTransmit = list
             }
+            return
+        }
+
+        // 2. 作为三方播放器与三方文件打开工具处理 (ACTION_VIEW)
+        if (Intent.ACTION_VIEW == action) {
+            val uri = intent.data ?: return
+            var displayName = "未知文件"
+            var fileSize = 0L
+
+            if ("content".equals(uri.scheme, ignoreCase = true)) {
+                try {
+                    contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                        if (cursor.moveToFirst()) {
+                            val nameIdx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                            if (nameIdx >= 0) {
+                                cursor.getString(nameIdx)?.takeIf { it.isNotBlank() }?.let { displayName = it }
+                            }
+                            val sizeIdx = cursor.getColumnIndex(OpenableColumns.SIZE)
+                            if (sizeIdx >= 0) {
+                                fileSize = cursor.getLong(sizeIdx)
+                            }
+                        }
+                    }
+                } catch (_: Exception) {}
+            } else if ("file".equals(uri.scheme, ignoreCase = true)) {
+                uri.path?.let { p ->
+                    val f = File(p)
+                    if (f.exists()) {
+                        displayName = f.name
+                        fileSize = f.length()
+                    }
+                }
+            }
+
+            if (displayName == "未知文件") {
+                uri.lastPathSegment?.takeIf { it.isNotBlank() }?.let { displayName = it }
+            }
+
+            val ext = displayName.substringAfterLast(".", "").lowercase()
+            val resolvedMime = type ?: contentResolver.getType(uri) ?: FileUtils.getMimeType(File(displayName))
+
+            val isVideo = resolvedMime.startsWith("video/") || FileUtils.isVideoExtension(ext)
+            val isAudio = resolvedMime.startsWith("audio/") || FileUtils.isAudioExtension(ext)
+            val isMedia = isVideo || isAudio
+
+            val localFile = if ("file".equals(uri.scheme, ignoreCase = true)) {
+                uri.path?.let { File(it) }?.takeIf { it.exists() }
+            } else {
+                uri.path?.let { File(it) }?.takeIf { it.exists() }
+            }
+
+            if (isMedia) {
+                incomingAction = IncomingAction.Play(
+                    uri = uri,
+                    title = displayName,
+                    isAudio = isAudio,
+                    file = localFile
+                )
+            } else {
+                incomingAction = IncomingAction.OtherFile(
+                    uri = uri,
+                    title = displayName,
+                    size = fileSize,
+                    mimeType = resolvedMime,
+                    file = localFile
+                )
+            }
         }
     }
 
-    private fun resolveSharedUriToFile(uri: Uri?): File? {
+    fun resolveSharedUriToFile(uri: Uri?): File? {
         if (uri == null) return null
         if ("file".equals(uri.scheme, ignoreCase = true)) {
             val file = uri.path?.let { File(it) }
@@ -194,6 +338,171 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
+fun ExternalOtherFileDialog(
+    action: IncomingAction.OtherFile,
+    onPlayAsMedia: () -> Unit,
+    onSendViaLocalSend: (File) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var isOperating by remember { mutableStateOf(false) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.AutoMirrored.Filled.InsertDriveFile, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "外部文件处理",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 18.sp
+                )
+            }
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text(
+                            text = action.title,
+                            fontWeight = FontWeight.SemiBold,
+                            fontSize = 15.sp
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "大小: ${if (action.size > 0) FileUtils.formatFileSize(action.size) else "流式数据"} · 类型: ${action.mimeType}",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+
+                Text(
+                    text = "点击其他文件已选择本应用打开，请选择您想对该文件执行的操作：",
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Spacer(modifier = Modifier.height(4.dp))
+
+                // 选项 1: 尝试以媒体播放器播放
+                OutlinedButton(
+                    onClick = onPlayAsMedia,
+                    modifier = Modifier.fillMaxWidth(),
+                    contentPadding = PaddingValues(12.dp)
+                ) {
+                    Icon(Icons.Default.PlayCircle, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("以内置播放器尝试播放")
+                }
+
+                // 选项 2: LocalSend 局域网发送
+                OutlinedButton(
+                    onClick = {
+                        scope.launch {
+                            isOperating = true
+                            val targetFile = action.file ?: withContext(Dispatchers.IO) {
+                                (context as? MainActivity)?.resolveSharedUriToFile(action.uri)
+                            }
+                            isOperating = false
+                            if (targetFile != null && targetFile.exists()) {
+                                onSendViaLocalSend(targetFile)
+                            } else {
+                                Toast.makeText(context, "无法读取该文件进行快传", Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    enabled = !isOperating,
+                    contentPadding = PaddingValues(12.dp)
+                ) {
+                    Icon(Icons.AutoMirrored.Filled.Send, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("通过 LocalSend 快传给其他设备")
+                }
+
+                // 选项 3: 保存/导出到本地手机「下载」目录
+                OutlinedButton(
+                    onClick = {
+                        scope.launch(Dispatchers.IO) {
+                            try {
+                                val downloadsDir = File(
+                                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+                                    "QFileManager"
+                                ).apply { if (!exists()) mkdirs() }
+                                var dest = File(downloadsDir, action.title)
+                                if (dest.exists()) {
+                                    val base = action.title.substringBeforeLast(".")
+                                    val ext = action.title.substringAfterLast(".", "")
+                                    val extStr = if (ext.isNotEmpty()) ".$ext" else ""
+                                    dest = File(downloadsDir, "${base}_${System.currentTimeMillis()}$extStr")
+                                }
+                                context.contentResolver.openInputStream(action.uri)?.use { input ->
+                                    FileOutputStream(dest).use { output ->
+                                        input.copyTo(output)
+                                    }
+                                }
+                                MediaScannerConnection.scanFile(context, arrayOf(dest.absolutePath), null, null)
+                                withContext(Dispatchers.Main) {
+                                    Toast.makeText(context, "已保存到：Download/QFileManager/${dest.name}", Toast.LENGTH_LONG).show()
+                                    onDismiss()
+                                }
+                            } catch (e: Exception) {
+                                withContext(Dispatchers.Main) {
+                                    Toast.makeText(context, "保存失败: ${e.message}", Toast.LENGTH_SHORT).show()
+                                }
+                            }
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    contentPadding = PaddingValues(12.dp)
+                ) {
+                    Icon(Icons.Default.Download, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("保存至本地「Download/QFileManager」")
+                }
+
+                // 选项 4: 如果是 APK 提供一键安装
+                if (action.title.endsWith(".apk", true)) {
+                    Button(
+                        onClick = {
+                            try {
+                                val intent = Intent(Intent.ACTION_VIEW).apply {
+                                    setDataAndType(action.uri, "application/vnd.android.package-archive")
+                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                }
+                                context.startActivity(intent)
+                                onDismiss()
+                            } catch (e: Exception) {
+                                Toast.makeText(context, "调起安装失败: ${e.message}", Toast.LENGTH_SHORT).show()
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth(),
+                        contentPadding = PaddingValues(12.dp)
+                    ) {
+                        Icon(Icons.Default.Android, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("安装此应用 (APK)")
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("关闭")
+            }
+        }
+    )
+}
+
+@Composable
 fun PermissionGuideScreen(onRequestPermission: () -> Unit) {
     Surface(modifier = Modifier.fillMaxSize()) {
         Column(
@@ -228,6 +537,13 @@ fun MainNavigation(initialFiles: List<File> = emptyList()) {
     val navController = rememberNavController()
     var targetTransmitFiles by remember { mutableStateOf(initialFiles) }
     var targetSmbUploadFiles by remember { mutableStateOf<List<File>>(emptyList()) }
+
+    LaunchedEffect(initialFiles) {
+        if (initialFiles.isNotEmpty()) {
+            targetTransmitFiles = initialFiles
+            navController.navigate("localsend")
+        }
+    }
 
     NavHost(
         navController = navController,

@@ -21,6 +21,21 @@ object FileUtils {
     private val APK_EXTENSIONS = setOf("apk", "apks", "xapk")
     private val ARCHIVE_EXTENSIONS = setOf("zip", "rar", "7z", "tar", "gz", "bz2", "xz")
 
+    fun isMediaExtension(extension: String): Boolean {
+        val ext = extension.lowercase(Locale.ROOT)
+        return VIDEO_EXTENSIONS.contains(ext) || AUDIO_EXTENSIONS.contains(ext) || ext == "m3u8"
+    }
+
+    fun isVideoExtension(extension: String): Boolean {
+        val ext = extension.lowercase(Locale.ROOT)
+        return VIDEO_EXTENSIONS.contains(ext) || ext == "m3u8"
+    }
+
+    fun isAudioExtension(extension: String): Boolean {
+        val ext = extension.lowercase(Locale.ROOT)
+        return AUDIO_EXTENSIONS.contains(ext)
+    }
+
     fun getCategory(extension: String): FileCategory {
         val ext = extension.lowercase(Locale.ROOT)
         return when {

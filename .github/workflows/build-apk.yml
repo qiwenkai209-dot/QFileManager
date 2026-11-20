@@ -37,7 +37,7 @@ jobs:
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: QFileManager-v1.0.5-debug
+          name: QFileManager-v1.0.6-debug
           path: app/build/outputs/apk/debug/*.apk
           retention-days: 30
 
@@ -45,13 +45,17 @@ jobs:
         if: github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.0.5-${{ github.run_number }}
-          name: "Q管理 v1.0.5 (Build ${{ github.run_number }})"
+          tag_name: v1.0.6-${{ github.run_number }}
+          name: "Q管理 v1.0.6 (Build ${{ github.run_number }})"
           body: |
             ### 🚀 Q管理 (QFileManager) 自动构建发布
             
             - **Commit**: ${{ github.sha }}
             - **功能更新**:
+              - 🎬 **注册为系统三方媒体播放器与通用文件打开工具**：
+                - 在其他 App（微信、QQ、浏览器、下载器、系统文件管理等）点击视频/音频文件时，系统「打开方式」列表中均可选择「Q管理」直接拉起内置 ExoPlayer 专业全屏播放器秒开播放
+                - 注册广泛的视频（video/*, mp4, mkv, avi, mov, flv, wmv, m3u8, ts等）、音频（audio/*, mp3, flac, wav, m4a等）及全类型文件匹配规则（*/*）
+                - 点击非媒体的其他文件（APK、压缩包、文档等）时，弹出专业外部文件操作面板，支持：强制播放尝试、一键通过 LocalSend 快传、转存导出至本地 Download/QFileManager、APK 一键安装及调用系统打开
               - 🚀 **LocalSend 传输错误与死锁超时问题彻底修复**：
                 - 修复 NanoHTTPD 服务端未按 Content-Length 截断导致 HTTP Keep-Alive 下 Socket 无限阻塞超时崩溃问题
                 - 修复 NanoHTTPD 在部分设备/大数据包下 postData 存放临时文件路径导致反序列化崩溃的问题
