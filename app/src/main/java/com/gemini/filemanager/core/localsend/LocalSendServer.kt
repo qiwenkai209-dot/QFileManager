@@ -15,6 +15,7 @@ import kotlinx.serialization.json.Json
 import java.io.BufferedOutputStream
 import java.io.File
 import java.io.FileOutputStream
+import java.io.IOException
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
@@ -37,13 +38,13 @@ class LocalSendServer(
         val uri = session.uri
         val method = session.method
 
-        // 统一处理 CORS 预检
+        // 统一处理 CORS 跨域预检
         if (method == Method.OPTIONS) {
             val response = newFixedLengthResponse(Response.Status.OK, "text/plain", "")
             return addCorsHeaders(response)
         }
 
-        // 设备信息查询接口 (LocalSend v2)
+        // 设备信息查询接口 (LocalSend v2 /api/localsend/v2/info)
         if (uri == LocalSendConstants.PATH_INFO && (method == Method.GET || method == Method.POST)) {
             val myInfo = LocalSendDeviceDto(
                 alias = myAlias,
@@ -65,7 +66,7 @@ class LocalSendServer(
             val map = HashMap<String, String>()
             try {
                 session.parseBody(map)
-                val postData = map["postData"] ?: ""
+                val postData = getBodyString(map)
                 if (postData.isNotEmpty()) {
                     val dto = json.decodeFromString<LocalSendDeviceDto>(postData)
                     if (dto.fingerprint != myFingerprint) {
@@ -103,12 +104,12 @@ class LocalSendServer(
             }
         }
 
-        // 上传会话准备
+        // 上传会话准备 (/api/localsend/v2/prepare-upload)
         if (uri == LocalSendConstants.PATH_PREPARE_UPLOAD && method == Method.POST) {
             val map = HashMap<String, String>()
             try {
                 session.parseBody(map)
-                val postData = map["postData"] ?: ""
+                val postData = getBodyString(map)
                 val req = json.decodeFromString<PrepareUploadRequestDto>(postData)
                 val sessionId = UUID.randomUUID().toString()
                 pendingSessions[sessionId] = req.files
@@ -125,7 +126,17 @@ class LocalSendServer(
             }
         }
 
-        // 文件实际流式上传接收
+        // 传输取消接口 (/api/localsend/v2/cancel)
+        if (uri == LocalSendConstants.PATH_CANCEL && method == Method.POST) {
+            val sessionId = session.parameters["sessionId"]?.firstOrNull() ?: ""
+            if (sessionId.isNotEmpty()) {
+                pendingSessions.remove(sessionId)
+            }
+            val response = newFixedLengthResponse(Response.Status.OK, "application/json; charset=utf-8", "{}")
+            return addCorsHeaders(response)
+        }
+
+        // 文件实际流式上传接收 (/api/localsend/v2/upload)
         if (uri == LocalSendConstants.PATH_UPLOAD && method == Method.POST) {
             val params = session.parameters
             val sessionId = params["sessionId"]?.firstOrNull() ?: ""
@@ -134,20 +145,21 @@ class LocalSendServer(
             val fileMap = pendingSessions[sessionId]
             val fileInfo = fileMap?.get(fileId)
 
-            val fileName = fileInfo?.fileName ?: "received_${System.currentTimeMillis()}"
-            val downloadDir = File(
-                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
-                "LocalSend"
-            )
-            if (!downloadDir.exists()) downloadDir.mkdirs()
+            val rawFileName = fileInfo?.fileName ?: "received_${System.currentTimeMillis()}"
+            val fileName = sanitizeFileName(rawFileName)
+            val downloadDir = getDownloadDirectory()
 
             var targetFile = File(downloadDir, fileName)
-            // 避免重名覆盖
+            // 避免重名覆盖，自动重命名如 (1), (2)
             if (targetFile.exists()) {
                 val base = fileName.substringBeforeLast(".")
                 val ext = fileName.substringAfterLast(".", "")
                 val extStr = if (ext.isNotEmpty()) ".$ext" else ""
-                targetFile = File(downloadDir, "${base}_${System.currentTimeMillis()}$extStr")
+                var counter = 1
+                while (targetFile.exists()) {
+                    targetFile = File(downloadDir, "${base} ($counter)$extStr")
+                    counter++
+                }
             }
 
             val tempFile = File(downloadDir, ".${fileName}.${UUID.randomUUID().toString().take(8)}.part")
@@ -165,10 +177,15 @@ class LocalSendServer(
                 var lastUiUpdateAt = 0L
 
                 BufferedOutputStream(FileOutputStream(tempFile), 256 * 1024).use { outputStream ->
-                    while (inputStream.read(buffer).also { bytesRead = it } > 0) {
-                        outputStream.write(buffer, 0, bytesRead)
-                        totalRead += bytesRead
-                        if (contentLength > 0L) {
+                    if (contentLength > 0L) {
+                        // 严格按 Content-Length 截断读取，避免 HTTP Keep-Alive 下 Socket 无限阻塞超时
+                        while (totalRead < contentLength) {
+                            val toRead = minOf(buffer.size.toLong(), contentLength - totalRead).toInt()
+                            bytesRead = inputStream.read(buffer, 0, toRead)
+                            if (bytesRead <= 0) break
+                            outputStream.write(buffer, 0, bytesRead)
+                            totalRead += bytesRead
+
                             val now = System.currentTimeMillis()
                             if (now - lastUiUpdateAt >= 150L || totalRead >= contentLength) {
                                 lastUiUpdateAt = now
@@ -176,8 +193,17 @@ class LocalSendServer(
                                 onReceiveProgress(targetFile.name, prog, contentLength)
                             }
                         }
+                    } else {
+                        while (inputStream.read(buffer).also { bytesRead = it } > 0) {
+                            outputStream.write(buffer, 0, bytesRead)
+                            totalRead += bytesRead
+                        }
                     }
                     outputStream.flush()
+                }
+
+                if (contentLength > 0L && totalRead < contentLength) {
+                    throw IOException("传输中断：接收文件不完整 ($totalRead / $contentLength 字节)")
                 }
 
                 if (!tempFile.renameTo(targetFile)) {
@@ -212,6 +238,39 @@ class LocalSendServer(
 
         val notFoundResponse = newFixedLengthResponse(Response.Status.NOT_FOUND, "text/plain", "Not Found")
         return addCorsHeaders(notFoundResponse)
+    }
+
+    private fun getBodyString(map: Map<String, String>): String {
+        val postData = map["postData"] ?: ""
+        if (postData.isBlank()) return ""
+        val trimmed = postData.trim()
+        if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+            return postData
+        }
+        val file = File(postData)
+        if (file.exists() && file.isFile) {
+            try {
+                return file.readText(Charsets.UTF_8)
+            } catch (_: Exception) {}
+        }
+        return postData
+    }
+
+    private fun sanitizeFileName(rawName: String): String {
+        val nameWithoutPath = rawName.substringAfterLast("/").substringAfterLast("\\")
+        val clean = nameWithoutPath.replace(Regex("[\\\\/:*?\"<>|]"), "_").trim()
+        return if (clean.isBlank()) "received_${System.currentTimeMillis()}" else clean
+    }
+
+    private fun getDownloadDirectory(): File {
+        val publicDownloads = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+        val target = File(publicDownloads, "LocalSend")
+        if (target.exists() || target.mkdirs()) {
+            return target
+        }
+        val fallback = File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "LocalSend")
+        if (!fallback.exists()) fallback.mkdirs()
+        return fallback
     }
 
     private fun addCorsHeaders(response: Response): Response {

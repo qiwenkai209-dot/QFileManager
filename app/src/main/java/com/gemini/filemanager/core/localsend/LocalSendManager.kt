@@ -140,7 +140,7 @@ object LocalSendManager {
                 AppBackgroundKeepAliveManager.acquireLease(ctx, "localsend_send", "LocalSend 发送文件")
             }
             try {
-                val success = c.sendFiles(target, files) { fileName, prog, speed ->
+                val result = c.sendFiles(target, files) { fileName, prog, speed ->
                     _transfers.update { list ->
                         list.map { item ->
                             if (item.fileName == fileName && item.direction == TransferDirection.SEND) {
@@ -154,11 +154,14 @@ object LocalSendManager {
                     }
                 }
 
-                if (!success) {
+                if (!result.success) {
                     _transfers.update { list ->
                         list.map { item ->
                             if (files.any { it.name == item.fileName } && item.direction == TransferDirection.SEND && item.status != TransferStatus.COMPLETED) {
-                                item.copy(status = TransferStatus.FAILED, errorMessage = "发送中断或对端拒绝")
+                                item.copy(
+                                    status = TransferStatus.FAILED,
+                                    errorMessage = result.errorMessage ?: "发送中断或对端拒绝"
+                                )
                             } else item
                         }
                     }

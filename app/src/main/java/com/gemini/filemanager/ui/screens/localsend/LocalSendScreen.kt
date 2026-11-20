@@ -468,22 +468,40 @@ fun TransferItemCard(transfer: TransferItem) {
                 )
                 Spacer(modifier = Modifier.width(8.dp))
                 Text(
-                    text = if (transfer.status == TransferStatus.COMPLETED) "已完成"
-                    else if (transfer.speed.isNotBlank()) transfer.speed
-                    else "${(transfer.progress * 100).toInt()}%",
+                    text = when (transfer.status) {
+                        TransferStatus.COMPLETED -> "已完成"
+                        TransferStatus.FAILED -> transfer.errorMessage ?: "传输失败"
+                        TransferStatus.CANCELLED -> "已取消"
+                        TransferStatus.CONNECTING -> "连接中..."
+                        TransferStatus.WAITING -> "等待中..."
+                        TransferStatus.TRANSFERRING -> if (transfer.speed.isNotBlank()) transfer.speed else "${(transfer.progress * 100).toInt()}%"
+                    },
                     fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = if (transfer.status == TransferStatus.FAILED)
+                        MaterialTheme.colorScheme.error
+                    else if (transfer.status == TransferStatus.COMPLETED)
+                        Color(0xFF00C853)
+                    else
+                        MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
 
             Spacer(modifier = Modifier.height(6.dp))
+
+            val progressColor = if (transfer.status == TransferStatus.FAILED)
+                MaterialTheme.colorScheme.error
+            else if (transfer.status == TransferStatus.COMPLETED)
+                Color(0xFF00C853)
+            else
+                MaterialTheme.colorScheme.primary
 
             LinearProgressIndicator(
                 progress = { transfer.progress },
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(4.dp)
-                    .clip(RoundedCornerShape(2.dp))
+                    .clip(RoundedCornerShape(2.dp)),
+                color = progressColor
             )
         }
     }

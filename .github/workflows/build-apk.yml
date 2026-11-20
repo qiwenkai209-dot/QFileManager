@@ -37,7 +37,7 @@ jobs:
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: QFileManager-v1.0.4-debug
+          name: QFileManager-v1.0.5-debug
           path: app/build/outputs/apk/debug/*.apk
           retention-days: 30
 
@@ -45,13 +45,20 @@ jobs:
         if: github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.0.4-${{ github.run_number }}
-          name: "Q管理 v1.0.4 (Build ${{ github.run_number }})"
+          tag_name: v1.0.5-${{ github.run_number }}
+          name: "Q管理 v1.0.5 (Build ${{ github.run_number }})"
           body: |
             ### 🚀 Q管理 (QFileManager) 自动构建发布
             
             - **Commit**: ${{ github.sha }}
             - **功能更新**:
+              - 🚀 **LocalSend 传输错误与死锁超时问题彻底修复**：
+                - 修复 NanoHTTPD 服务端未按 Content-Length 截断导致 HTTP Keep-Alive 下 Socket 无限阻塞超时崩溃问题
+                - 修复 NanoHTTPD 在部分设备/大数据包下 postData 存放临时文件路径导致反序列化崩溃的问题
+                - 发送端 OkHttp 写超时设为 0（无限制），避免大文件或网络拥塞时被 120 秒超时掐断
+                - 增加 Okio 块写入与循环即时 flush，保障数据推入底层 TCP 套接字
+                - 增加安全文件名清洗、重名递增保护及公共/私有存储路径回退机制，杜绝写入权限或非法字符异常
+                - 传输错误时在 UI 卡片中精准显示具体失败原因（对端拒绝、握手失败、网络中断等）及高亮提示
               - 📡 **LocalSend 局域网发现与被发现功能深度加固**：
                 - 彻底修复设备指纹多模块不一致 Bug，全局统一持久化设备指纹
                 - 遵循官方 LocalSend v2 协议规范，服务端新增 `/api/localsend/v2/register` 接口与完整 CORS 跨域支持
